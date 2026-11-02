@@ -1,0 +1,51 @@
+# Life-OS Telegram assistant (Cloudflare Workers, free plan). Setup: README.md
+# Secrets (npx wrangler secret put <NAME>):
+#   TELEGRAM_BOT_TOKEN, OWNER_ID, WEBHOOK_SECRET, ANTHROPIC_API_KEY, DEEPSEEK_API_KEY, GITHUB_TOKEN
+name = "life-os-bot"
+main = "src/index.ts"
+compatibility_date = "2026-10-01"
+compatibility_flags = ["nodejs_compat"]
+
+[observability]
+enabled = true
+
+[triggers]
+crons = ["*/5 * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "life_os"
+database_id = "REPLACE_WITH_ID_FROM_wrangler_d1_create"
+migrations_dir = "migrations"
+
+[[queues.producers]]
+binding = "QUEUE"
+queue = "life-os-inbox"
+
+[[queues.consumers]]
+queue = "life-os-inbox"
+max_batch_size = 10
+max_batch_timeout = 2
+max_retries = 1
+max_concurrency = 1
+dead_letter_queue = "life-os-dlq"
+
+[[queues.consumers]]
+queue = "life-os-dlq"
+max_batch_size = 10
+max_retries = 0
+
+[ai]
+binding = "AI"
+remote = true
+
+[vars]
+TIMEZONE = "Europe/Rome"
+CHAT_MODEL = "claude-haiku-5-5"
+ROUTINE_MODEL = "claude-opus-5-5"
+DEEPSEEK_MODEL = "deepseek-v4-flash"
+MONTHLY_CAP_USD = "40"
+VAULT_REPO = "MehrshadAlipoor/myBlog1"
+VAULT_BRANCH = "main"
+BACKUP_REPO = "MehrshadAlipoor/life-os-bot"
+BACKUP_BRANCH = "backups"
