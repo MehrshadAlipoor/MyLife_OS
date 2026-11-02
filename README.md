@@ -41,12 +41,12 @@ cron every 5 min → reminders now; brief, check-in, review, vault export, backu
 
 4. **GitHub token for the vault and backups** (optional at first; the vault export and backup are skipped without it).
    - Go to GitHub → Settings → Developer settings → **Fine-grained tokens**.
-   - Repositories: `myBlog1` and `life-os-bot`. Permissions → **Contents: Read and write**.
+   - Repositories: `myBlog1` and `MyLife_OS`. Permissions → **Contents: Read and write**.
    - If your vault's branch isn't `main`, change `VAULT_BRANCH` in `wrangler.toml`.
 
 5. **Deploy the Worker.** Use the same Cloudflare account as `phd-hunter-bot`:
    ```powershell
-   cd life-os-bot
+   cd LifeOS
    npm install
    npx wrangler login
    npx wrangler d1 create life_os          # paste the printed database_id into wrangler.toml
