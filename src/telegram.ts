@@ -215,7 +215,9 @@ export function typing(env: Env): Promise<unknown> {
 }
 
 export function answerCallback(env: Env, id: string, text?: string): Promise<unknown> {
-  return tg(env, 'answerCallbackQuery', { callback_query_id: id, ...(text ? { text } : {}) }).catch(() => undefined);
+  // Telegram rejects callback answers over 200 characters, which would leave the button spinning.
+  return tg(env, 'answerCallbackQuery', { callback_query_id: id, ...(text ? { text: text.length > 200 ? `${text.slice(0, 199)}…` : text } : {}) })
+    .catch(e => console.error('answerCallbackQuery', e));
 }
 
 /** Best effort ⚠️ to the owner; never throws (used from error paths). */

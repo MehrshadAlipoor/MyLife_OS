@@ -86,7 +86,7 @@ cron every 5 min → reminders now; brief, check-in, review, vault export, backu
 | `/routine` | Routine times; `/routine morning 07:30`, `/routine checkin off` |
 | `/quiet 3d` | Pause the brief and check-in for 3 days (`/quiet off` resumes); reminders still come |
 | `/areas` | Show or set your life areas |
-| `/undo` | Revert the last change (a task, reminder, log or memory) |
+| `/undo` | Shows the last task, reminder, log or memory change and reverts it after you confirm (routine and setting changes are changed back directly) |
 | `/new` | Start a fresh conversation (your data stays) |
 | `/status` | Models, spend this month, Claude health, last cron run, last error |
 
@@ -118,7 +118,7 @@ It never overwrites a note without that marker, so your own notes are safe. Obsi
 - Messages go to Anthropic's API.
 - Messages go to DeepSeek only after you tap **Send via DeepSeek** on a specific message. Routines never use DeepSeek.
 - Forwarded messages, text read from photos, and vault notes are treated as data, never as instructions.
-- Every change is logged, and `/undo` reverts it.
+- Changes to tasks, reminders, logs and memory are logged, and `/undo` reverts them after you confirm.
 
 ## Limits worth knowing
 

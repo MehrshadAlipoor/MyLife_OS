@@ -68,6 +68,7 @@ function forwardedFrom(msg: TgMessage): string | null {
 }
 
 const wrapUntrusted = (source: string, text: string) => `<untrusted source="${source}">\n${text}\n</untrusted>`;
+const captionBlock = (caption: string, forwarded: string | null) => (forwarded ? wrapUntrusted(`caption forwarded from ${forwarded}`, caption) : caption);
 
 /**
  * One Telegram message → text blocks for the model. Voice transcripts are echoed back at once so
@@ -104,7 +105,7 @@ export async function messageToBlocks(env: Env, msg: TgMessage): Promise<BetaTex
       console.error('transcription failed', e);
       await sendHtml(env, `🎙 Transcription failed (${esc(e instanceof Error ? e.message : String(e))}). Please send it as text.`);
     }
-    if (caption) add(caption);
+    if (caption) add(captionBlock(caption, forwarded));
     return blocks;
   }
 
@@ -121,15 +122,15 @@ export async function messageToBlocks(env: Env, msg: TgMessage): Promise<BetaTex
       const why = e instanceof ProviderUnavailable ? `Claude is unavailable: ${e.reason}` : e instanceof Error ? e.message : String(e);
       add(`<photo_description>(the photo could not be read: ${why})</photo_description>`);
     }
-    if (caption) add(forwarded ? wrapUntrusted(`caption forwarded from ${forwarded}`, caption) : caption);
+    if (caption) add(captionBlock(caption, forwarded));
     return blocks;
   }
 
   if (msg.document) {
     await sendHtml(env, `📎 I can't read ${esc(msg.document.mime_type ?? 'this kind of')} files yet: text, voice notes and photos work.`);
-    if (caption) add(caption);
+    if (caption) add(captionBlock(caption, forwarded));
     return blocks;
   }
-  if (caption) add(caption);
+  if (caption) add(captionBlock(caption, forwarded));
   return blocks;
 }

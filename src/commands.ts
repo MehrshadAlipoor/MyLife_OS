@@ -5,7 +5,7 @@
 
 import type { Env, RoutineName, TgCallbackQuery } from './env';
 import { ROUTINE_NAMES } from './env';
-import { activeTasks, first, getAreas, getState, getTask, insertRow, pendingReminders, routines, run, setState, undoLast, updateRow } from './db';
+import { activeTasks, applyUndo, first, getAreas, getState, getTask, insertRow, peekUndo, pendingReminders, routines, run, setState, updateRow } from './db';
 import type { Reminder, Routine, Task } from './db';
 import { closeSession } from './agent';
 import { breakerState, monthToDateUsd } from './llm';
@@ -13,7 +13,7 @@ import { answerCallback, editHtml, esc, rtl, sendHtml, tg } from './telegram';
 import type { Keyboard } from './telegram';
 import { progressStats } from './tools';
 import type { ProgressStats } from './tools';
-import { addDays, isTime, localParts, relativeDay, shortDate, weekStart, zonedToUtc } from './time';
+import { addDays, isTime, localParts, nextOccurrence, relativeDay, shortDate, weekStart, zonedToUtc } from './time';
 
 export const COMMANDS: [string, string][] = [
   ['today', 'agenda: overdue, due today, reminders'],
@@ -24,7 +24,7 @@ export const COMMANDS: [string, string][] = [
   ['routine', 'show or change routines'],
   ['quiet', 'pause brief + check-in (/quiet 3d, /quiet off)'],
   ['areas', 'show or set life areas (/areas phd lab mms)'],
-  ['undo', 'revert the last change'],
+  ['undo', 'revert the last task/reminder/log change (asks first)'],
   ['new', 'start a fresh conversation'],
   ['status', 'models, monthly cost, health']
 ];
@@ -84,7 +84,7 @@ export function formatTasks(tasks: Task[], today: string, area: string | null): 
 
 export function bar(done: number, total: number, width = 8): string {
   if (!total) return '░'.repeat(width);
-  const filled = Math.round((done / total) * width);
+  const filled = Math.min(width, Math.max(0, Math.round((done / total) * width)));
   return '▇'.repeat(filled) + '░'.repeat(width - filled);
 }
 
@@ -187,8 +187,9 @@ export async function handleCommand(env: Env, name: string, args: string, now: D
       await sendHtml(env, '🆕 Fresh conversation. Your tasks and notes are all still here.');
       return true;
     case 'undo': {
-      const done = await undoLast(env.DB);
-      await sendHtml(env, done ? `↩️ ${esc(done)}` : 'Nothing to undo.');
+      const change = await peekUndo(env.DB);
+      if (!change) await sendHtml(env, 'Nothing to undo (routine and setting changes are changed back directly).');
+      else await sendHtml(env, `↩️ ${esc(change.label)}?`, [[{ text: '↩️ Undo it', callback_data: `u:yes:${change.id}` }, { text: 'Cancel', callback_data: 'u:no:0' }]]);
       return true;
     }
     case 'routine':
@@ -334,6 +335,12 @@ export async function applyButton(env: Env, data: string, now: Date): Promise<Bu
         return { toast: `📅 Tomorrow ${r.local_time}`, label: '📅 Tomorrow' };
       }
     }
+  }
+
+  if (scope === 'u') {
+    if (action !== 'yes') return { toast: 'OK', replaceText: 'Nothing changed.' };
+    const done = await applyUndo(env.DB, id, r => nextOccurrence(r.repeat, r.local_date, r.local_time, tz, now));
+    return done ? { toast: '↩️ Undone', replaceText: `↩️ ${done}` } : { toast: 'Already undone' };
   }
 
   if (scope === 'fb') {

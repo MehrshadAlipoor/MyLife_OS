@@ -52,7 +52,8 @@ export async function runCron(env: Env, now = new Date()): Promise<void> {
     try {
       await sendReminder(env, r, now);
     } catch (e) {
-      await run(env.DB, "UPDATE reminders SET status = 'pending' WHERE id = ?", r.id);
+      // Only if it is still mid-send: once sent (or cancelled meanwhile) it must not go out again.
+      await run(env.DB, "UPDATE reminders SET status = 'pending' WHERE id = ? AND status = 'sending'", r.id);
       errors.push(`reminder R${r.id}: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
@@ -84,14 +85,20 @@ async function sendReminder(env: Env, r: Reminder, now: Date): Promise<void> {
   await sendHtml(env, rtl(`${esc(text)}${r.task_id ? ` /T${r.task_id}` : ''}`), reminderKeyboard(r));
   const next = nextOccurrence(r.repeat, r.local_date, r.local_time, env.TIMEZONE, now);
   if (next) {
-    await run(env.DB, "UPDATE reminders SET status = 'pending', next_due_utc = ?, local_date = ? WHERE id = ?", next.utc.toISOString(), next.date, r.id);
+    await run(env.DB, "UPDATE reminders SET status = 'pending', next_due_utc = ?, local_date = ? WHERE id = ? AND status = 'sending'", next.utc.toISOString(), next.date, r.id);
   } else {
-    await run(env.DB, "UPDATE reminders SET status = 'sent' WHERE id = ?", r.id);
+    await run(env.DB, "UPDATE reminders SET status = 'sent' WHERE id = ? AND status = 'sending'", r.id);
   }
-  await addOutbox(env.DB, 'reminder', `${text} (R${r.id}${r.task_id ? `, task T${r.task_id}` : ''})`);
+  await addOutbox(env.DB, 'reminder', `${text} (R${r.id}${r.task_id ? `, task T${r.task_id}` : ''})`).catch(e => console.error('outbox', e));
 }
 
 // ---------------------------------------------------------------- routines
+
+/** "Now" for a routine claimed for `date`: the real time, or that day's last minute if the job runs after it. */
+export function routineClock(date: string, tz: string, real = new Date()): Date {
+  const endOfDay = zonedToUtc(addDays(date, 1), '00:00', tz).getTime() - 60_000;
+  return new Date(Math.min(real.getTime(), endOfDay));
+}
 
 export async function runRoutine(env: Env, name: RoutineName | 'day_plan', now = new Date()): Promise<void> {
   const today = localParts(now, env.TIMEZONE).date;
@@ -168,14 +175,18 @@ export function templateBrief(tasks: Task[], reminders: Reminder[], today: strin
 async function morningBrief(env: Env, now: Date): Promise<void> {
   const data = await briefData(env, now);
   const known = new Set([...data.overdue, ...data.due_today, ...data.candidates].map(t => Number(t.id.slice(1))));
+  let md = '';
   try {
-    const md = await routineText(env, 'brief', BRIEF_PROMPT, data, now);
-    if (!md) throw new Error('empty brief');
+    md = await routineText(env, 'brief', BRIEF_PROMPT, data, now);
+  } catch (e) {
+    if (!(e instanceof ProviderUnavailable)) await recordError(env, `morning brief: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (md) {
+    // Once the AI brief is out, nothing falls back to the template (that would send two briefs).
     const ids = [...new Set([...md.matchAll(/\/T(\d+)/g)].map(m => Number(m[1])))].filter(id => known.has(id)).slice(0, 3);
     await sendMarkdown(env, md, doneButtons(ids));
     await addOutbox(env.DB, 'morning_brief', md);
-  } catch (e) {
-    if (!(e instanceof ProviderUnavailable)) await recordError(env, `morning brief: ${e instanceof Error ? e.message : String(e)}`);
+  } else {
     const today = localParts(now, env.TIMEZONE).date;
     const fallback = templateBrief(await activeTasks(env.DB), await pendingReminders(env.DB), today, env.TIMEZONE);
     await sendHtml(env, fallback.html, fallback.keyboard);

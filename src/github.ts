@@ -112,4 +112,7 @@ export async function commitFiles(env: Env, repo: string, branch: string, messag
 /** Generated files carry this frontmatter flag; anything without it is the user's and is never overwritten. */
 export const GENERATED_MARK = 'generated: life-os';
 
-export const isGenerated = (text: string) => /^---\r?\n(?:[^\n]*\n)*?generated: life-os\r?\n(?:[^\n]*\n)*?---/.test(text);
+export function isGenerated(text: string): boolean {
+  const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/.exec(text);
+  return !!frontmatter && /^generated: life-os[ \t]*\r?$/m.test(frontmatter[1] ?? '');
+}

@@ -11,7 +11,7 @@ import { ROUTINE_NAMES } from './env';
 import { activeTasks, all, doneBetween, first, getAreas, getTask, insertRow, logsBetween, pendingReminders, run, setState, updateRow } from './db';
 import type { LogRow, MemoryRow, Reminder, Task } from './db';
 import { readPath, safeVaultPath } from './github';
-import { addDays, isDate, isTime, localParts, nextOccurrence, weekStart, zonedToUtc } from './time';
+import { addDays, isDate, isoWeekday, isTime, localParts, nextOccurrence, weekStart, zonedToUtc } from './time';
 import type { Repeat } from './time';
 
 export class ToolError extends Error {}
@@ -234,7 +234,12 @@ const handlers: Record<string, Handler> = {
     const taskId = input.task_id == null ? null : Number(input.task_id);
     if (taskId != null && !(await getTask(ctx.env.DB, taskId))) throw new ToolError(`No task T${taskId}`);
     let due = zonedToUtc(date, time, tz);
-    if (due.getTime() <= ctx.now.getTime() - 60_000) {
+    if (repeat === 'weekdays' && isoWeekday(date) > 5) {
+      // "Every weekday" starting on a weekend begins the next Monday.
+      const monday = nextOccurrence('weekdays', date, time, tz, ctx.now)!;
+      date = monday.date;
+      due = monday.utc;
+    } else if (due.getTime() <= ctx.now.getTime() - 60_000) {
       const next = nextOccurrence(repeat, date, time, tz, ctx.now);
       if (!next) throw new ToolError(`${date} ${time} is in the past (now ${localParts(ctx.now, tz).date} ${localParts(ctx.now, tz).time})`);
       date = next.date;

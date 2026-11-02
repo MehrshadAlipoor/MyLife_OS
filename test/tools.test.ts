@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { getTask, undoLast } from '../src/db';
+import { applyUndo, getTask, peekUndo } from '../src/db';
 import type { Reminder } from '../src/db';
 import { runTool } from '../src/tools';
 import { resetDb, testEnv } from './helpers';
@@ -8,6 +8,11 @@ const env = testEnv();
 const now = new Date('2026-11-02T14:00:00Z'); // Mon 15:00 in Rome
 const call = (name: string, input: Record<string, unknown>) => runTool({ id: 'toolu_x', name, input }, { env, now, source: 'voice' });
 const task = (id: number) => getTask(env.DB, id);
+const noReschedule = () => null;
+async function undoLast(): Promise<string | null> {
+  const change = await peekUndo(env.DB);
+  return change ? applyUndo(env.DB, change.id, noReschedule) : null;
+}
 
 beforeEach(() => resetDb(env));
 
@@ -57,15 +62,29 @@ describe('tasks', () => {
     const added = await call('add_task', { title: 'Write email', area: null, due_date: null, due_time: null, priority: null, notes: null });
     const id = Number(String(added.content).match(/T(\d+)/)![1]);
     await call('update_task', { id, title: 'Write the email', area: null, due_date: null, due_time: null, priority: null, status: null, notes: null });
-    expect(await undoLast(env.DB)).toContain('Restored task');
+    expect((await peekUndo(env.DB))?.label).toContain('Restore the previous version of task');
+    expect(await undoLast()).toContain('Restored task');
     expect((await task(id))?.title).toBe('Write email');
-    expect(await undoLast(env.DB)).toContain('Removed task');
+    expect(await undoLast()).toContain('Removed task');
     expect(await task(id)).toBeNull();
-    expect(await undoLast(env.DB)).toBeNull();
+    expect(await undoLast()).toBeNull();
   });
 });
 
 describe('reminders', () => {
+  it('starts an every-weekday reminder set on a weekend on Monday', async () => {
+    const saturday = new Date('2026-11-07T10:00:00Z');
+    await runTool({ id: 't', name: 'set_reminder', input: { text: 'standup', date: '2026-11-08', time: '08:00', repeat: 'weekdays', task_id: null } }, { env, now: saturday, source: 'chat' });
+    expect((await env.DB.prepare('SELECT local_date FROM reminders').first<Reminder>())?.local_date).toBe('2026-11-09');
+  });
+
+  it('undoing a cancel never fires a one-off reminder late', async () => {
+    await env.DB.prepare(`INSERT INTO reminders (id, text, next_due_utc, local_date, local_time, repeat, created_at) VALUES (1, 'old', '2026-11-01T09:00:00.000Z', '2026-11-01', '10:00', 'none', '')`).run();
+    await call('cancel_reminder', { id: 1 });
+    expect(await undoLast()).toContain('stays off');
+    expect((await env.DB.prepare('SELECT status FROM reminders').first<Reminder>())?.status).toBe('cancelled');
+  });
+
   it('stores local time and the UTC instant', async () => {
     const res = await call('set_reminder', { text: 'Call Mimmo', date: '2026-11-03', time: '10:00', repeat: 'none', task_id: null });
     expect(res.content).toContain('R');

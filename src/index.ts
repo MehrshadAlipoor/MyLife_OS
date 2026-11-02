@@ -14,7 +14,7 @@ import { all, first, run } from './db';
 import { continueTurn, runChatTurn } from './agent';
 import { ProviderUnavailable } from './llm';
 import { messageToBlocks } from './media';
-import { recordError, runCron, runRoutine } from './routines';
+import { recordError, routineClock, runCron, runRoutine } from './routines';
 import { esc, sendHtml, sendMarkdown, tg, typing, warn } from './telegram';
 import { localParts, localTime } from './time';
 
@@ -145,7 +145,7 @@ async function runFallback(env: Env, id: number): Promise<void> {
 async function runJob(env: Env, job: Exclude<Job, { kind: 'update' }>): Promise<void> {
   try {
     if (job.kind === 'fallback') await runFallback(env, job.id);
-    else await runRoutine(env, job.name);
+    else await runRoutine(env, job.name, job.name === 'day_plan' ? new Date() : routineClock(job.date, env.TIMEZONE));
   } catch (e) {
     if (e instanceof ProviderUnavailable && job.kind === 'routine' && job.name === 'day_plan') {
       await offerFallback(env, e.reason);

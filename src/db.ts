@@ -113,24 +113,52 @@ export async function updateRow<T extends { id: number }>(db: D1Database, entity
   return { before, after };
 }
 
-/** Revert the newest change from the last 7 days; returns a short description, or null if nothing to undo. */
-export async function undoLast(db: D1Database): Promise<string | null> {
+interface ChangeRow { id: number; ts: string; entity: Entity; entity_id: number; before_json: string | null; after_json: string | null; undone: number }
+
+/**
+ * The newest undoable change from the last 7 days, described ("Remove task /T14 …"), so /undo can
+ * ask for confirmation first. Only task, reminder, log and memory writes are logged; routine and
+ * settings changes are not, and are undone by changing them again.
+ */
+export async function peekUndo(db: D1Database): Promise<{ id: number; label: string } | null> {
   const since = new Date(Date.now() - 7 * 86400_000).toISOString();
-  const change = await first<{ id: number; entity: Entity; entity_id: number; before_json: string | null; after_json: string | null }>(db,
-    'SELECT * FROM changes WHERE undone = 0 AND ts >= ? ORDER BY id DESC LIMIT 1', since);
+  const change = await first<ChangeRow>(db, 'SELECT * FROM changes WHERE undone = 0 AND ts >= ? ORDER BY id DESC LIMIT 1', since);
+  if (!change) return null;
+  const row = describeRow(change.entity, JSON.parse(change.after_json ?? change.before_json ?? '{}'));
+  return { id: change.id, label: `${change.before_json == null ? 'Remove' : 'Restore the previous version of'} ${row} (changed ${change.ts.slice(0, 16).replace('T', ' ')} UTC)` };
+}
+
+/**
+ * Revert one logged change. A reminder restored with a time already past is not fired late:
+ * a repeating one moves to its next occurrence (via `reschedule`), a one-off stays cancelled.
+ */
+export async function applyUndo(db: D1Database, changeId: number, reschedule: (r: Reminder) => { date: string; utc: Date } | null): Promise<string | null> {
+  const change = await first<ChangeRow>(db, 'SELECT * FROM changes WHERE id = ? AND undone = 0', changeId);
   if (!change) return null;
   const label = describeRow(change.entity, JSON.parse(change.after_json ?? change.before_json ?? '{}'));
+  let note = '';
   if (change.before_json == null) {
     if (change.entity === 'reminders') await run(db, "UPDATE reminders SET status = 'cancelled' WHERE id = ?", change.entity_id);
     else await run(db, `UPDATE ${change.entity} SET deleted_at = ? WHERE id = ?`, new Date().toISOString(), change.entity_id);
   } else {
     const before = JSON.parse(change.before_json) as Record<string, unknown>;
     delete before.id;
+    if (change.entity === 'reminders' && (before.status === 'pending' || before.status === 'sending') && String(before.next_due_utc) <= new Date().toISOString()) {
+      const next = reschedule(before as unknown as Reminder);
+      if (next) {
+        before.next_due_utc = next.utc.toISOString();
+        before.local_date = next.date;
+        before.status = 'pending';
+      } else {
+        before.status = 'cancelled';
+        note = ' (its time has passed, so it stays off)';
+      }
+    }
     const keys = columns(before);
     await run(db, `UPDATE ${change.entity} SET ${keys.map(k => `${k} = ?`).join(', ')} WHERE id = ?`, ...keys.map(k => before[k]), change.entity_id);
   }
   await run(db, 'UPDATE changes SET undone = 1 WHERE id = ?', change.id);
-  return `${change.before_json == null ? 'Removed' : 'Restored'} ${label}`;
+  return `${change.before_json == null ? 'Removed' : 'Restored'} ${label}${note}`;
 }
 
 function describeRow(entity: Entity, row: Record<string, unknown>): string {
