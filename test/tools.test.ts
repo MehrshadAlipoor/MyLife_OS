@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { applyUndo, getTask, peekUndo } from '../src/db';
 import type { Reminder } from '../src/db';
-import { runTool } from '../src/tools';
+import { MAX_STRICT_UNION_PARAMS, TOOLS, runTool } from '../src/tools';
 import { resetDb, testEnv } from './helpers';
 
 const env = testEnv();
@@ -15,6 +15,23 @@ async function undoLast(): Promise<string | null> {
 }
 
 beforeEach(() => resetDb(env));
+
+describe('tool schemas', () => {
+  it('stays within the API limit on union-typed parameters across strict tools', () => {
+    const unions = TOOLS.filter(t => t.strict)
+      .flatMap(t => Object.values((t.input_schema.properties ?? {}) as Record<string, Record<string, unknown>>))
+      .filter(p => 'anyOf' in p || Array.isArray(p.type)).length;
+    expect(unions).toBeLessThanOrEqual(MAX_STRICT_UNION_PARAMS);
+  });
+
+  it('checks update_task inputs itself, since that tool is not strict', async () => {
+    expect((await call('update_task', { id: 'abc' })).is_error).toBe(true);
+    const added = await call('add_task', { title: 'x', area: null, due_date: null, due_time: null, priority: null, notes: null });
+    const id = Number(/T(\d+)/.exec(String(added.content))![1]);
+    expect((await call('update_task', { id, priority: 7 })).is_error).toBe(true);
+    expect((await call('update_task', { id, status: 'done' })).is_error).toBeFalsy();
+  });
+});
 
 describe('tasks', () => {
   it('adds a task, validating the area', async () => {
