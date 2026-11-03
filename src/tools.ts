@@ -1,5 +1,6 @@
 /**
- * Tools the chat model can call. Strict schemas (optional fields are nullable and still required);
+ * Tools the chat model can call. Strict schemas (optional fields are left out of `required`, not
+ * nullable: the API allows at most 16 union-typed parameters across all strict tools);
  * every input is validated again here and a problem comes back as an is_error result the model can
  * fix. Writes go through insertRow/updateRow so /undo can revert them. The list is static, so the
  * request prefix (and its cache) stays stable.
@@ -27,15 +28,18 @@ export interface ToolContext {
 
 type Schema = Record<string, unknown>;
 const str = (description: string): Schema => ({ type: 'string', description });
-const orNull = (schema: Schema): Schema => ({ anyOf: [schema, { type: 'null' }] });
+const optional = new WeakSet<Schema>();
+/** A field the model may leave out; handlers treat a missing field like null. */
+const opt = (schema: Schema): Schema => (optional.add(schema), schema);
 const strEnum = (values: readonly string[], description: string): Schema => ({ type: 'string', enum: values, description });
 
 function tool(name: string, description: string, properties: Record<string, Schema>): BetaTool {
+  const required = Object.entries(properties).filter(([, s]) => !optional.has(s)).map(([k]) => k);
   return {
     name,
     description,
     strict: true,
-    input_schema: { type: 'object', properties, required: Object.keys(properties), additionalProperties: false }
+    input_schema: { type: 'object', properties, required, additionalProperties: false }
   };
 }
 
@@ -48,53 +52,53 @@ const PERIODS = ['today', 'week', 'month'] as const;
 export const TOOLS: BetaTool[] = [
   tool('add_task', 'Create a task. Use due_date only when there is a real deadline or a day it should happen.', {
     title: str('Short imperative title, in the language he used'),
-    area: orNull(str('One of the areas from the snapshot')),
-    due_date: orNull(str('YYYY-MM-DD local')),
-    due_time: orNull(str('HH:MM local, only if a time matters')),
-    priority: orNull({ type: 'integer', enum: [1, 2, 3], description: '1 high, 2 normal (default), 3 low' }),
-    notes: orNull(str('Extra details'))
+    area: opt(str('One of the areas from the snapshot')),
+    due_date: opt(str('YYYY-MM-DD local')),
+    due_time: opt(str('HH:MM local, only if a time matters')),
+    priority: opt({ type: 'integer', enum: [1, 2, 3], description: '1 high, 2 normal (default), 3 low' }),
+    notes: opt(str('Extra details'))
   }),
-  tool('update_task', 'Change a task: fields left null stay as they are. Use status "done" to complete it. An empty string for due_date or due_time removes it.', {
+  tool('update_task', 'Change a task: fields left out stay as they are. Use status "done" to complete it. An empty string for due_date or due_time removes it.', {
     id: { type: 'integer', description: 'Task id (12 for /T12)' },
-    title: orNull(str('New title')),
-    area: orNull(str('New area')),
-    due_date: orNull(str('YYYY-MM-DD local, or "" to clear')),
-    due_time: orNull(str('HH:MM local, or "" to clear')),
-    priority: orNull({ type: 'integer', enum: [1, 2, 3] }),
-    status: orNull(strEnum(STATUSES, 'open | waiting (on someone else) | done | dropped')),
-    notes: orNull(str('Replaces the notes'))
+    title: opt(str('New title')),
+    area: opt(str('New area')),
+    due_date: opt(str('YYYY-MM-DD local, or "" to clear')),
+    due_time: opt(str('HH:MM local, or "" to clear')),
+    priority: opt({ type: 'integer', enum: [1, 2, 3] }),
+    status: opt(strEnum(STATUSES, 'open | waiting (on someone else) | done | dropped')),
+    notes: opt(str('Replaces the notes'))
   }),
   tool('list_tasks', 'List tasks. today = due today or overdue; upcoming = next 7 days; area needs the area field; done_recently = finished in the last 7 days.', {
     filter: strEnum(FILTERS, 'Which tasks'),
-    area: orNull(str('Area for filter=area'))
+    area: opt(str('Area for filter=area'))
   }),
   tool('log_entry', 'Record progress, a win, a blocker, mood (value 1-5), a habit done, a note, or an evening check-in.', {
     kind: strEnum(LOG_KINDS, 'Entry type'),
     text: str('What happened, in his words (short)'),
-    area: orNull(str('Area, if it belongs to one')),
-    value: orNull({ type: 'number', description: 'Mood 1-5 for mood/checkin, or a quantity (minutes, count)' })
+    area: opt(str('Area, if it belongs to one')),
+    value: opt({ type: 'number', description: 'Mood 1-5 for mood/checkin, or a quantity (minutes, count)' })
   }),
   tool('set_reminder', 'Send him a Telegram reminder at a local date and time, optionally repeating from then on.', {
     text: str('Reminder text'),
     date: str('YYYY-MM-DD local'),
     time: str('HH:MM local'),
     repeat: strEnum(REPEATS, 'none | daily | weekdays | weekly'),
-    task_id: orNull({ type: 'integer', description: 'Related task id, so the reminder gets a Done button' })
+    task_id: opt({ type: 'integer', description: 'Related task id, so the reminder gets a Done button' })
   }),
   tool('list_reminders', 'List upcoming reminders.', {}),
   tool('cancel_reminder', 'Cancel a reminder.', { id: { type: 'integer', description: 'Reminder id (5 for R5)' } }),
   tool('get_progress', 'Progress numbers from logged data: tasks done/open per area, logs, mood, check-ins.', {
     period: strEnum(PERIODS, 'today | week (since Monday) | month'),
-    area: orNull(str('Limit to one area'))
+    area: opt(str('Limit to one area'))
   }),
   tool('remember', 'Store a lasting fact or preference about him (people, routines, fixed commitments).', {
     fact: str('The fact, one sentence')
   }),
   tool('forget', 'Delete a remembered fact.', { id: { type: 'integer', description: 'Memory id (3 for M3)' } }),
-  tool('update_routine', 'Change when an automatic routine runs, or turn it on/off. Fields left null stay as they are.', {
+  tool('update_routine', 'Change when an automatic routine runs, or turn it on/off. Fields left out stay as they are.', {
     name: strEnum(ROUTINE_NAMES, 'morning_brief | evening_checkin | weekly_review | vault_export | backup'),
-    time: orNull(str('HH:MM local')),
-    enabled: orNull({ type: 'boolean' })
+    time: opt(str('HH:MM local')),
+    enabled: opt({ type: 'boolean' })
   }),
   tool('set_quiet', 'Pause the morning brief and evening check-in for some days (reminders still arrive). 0 resumes them.', {
     days: { type: 'integer', description: 'Number of days including today; 0 to resume' }
@@ -112,7 +116,7 @@ async function checkArea(env: Env, area: unknown): Promise<string | null> {
   if (area == null || area === '') return null;
   const areas = await getAreas(env.DB);
   const found = areas.find(a => a.toLowerCase() === S(area).toLowerCase());
-  if (!found) throw new ToolError(`Unknown area "${S(area)}". Areas: ${areas.join(', ')}. Use null if none fits.`);
+  if (!found) throw new ToolError(`Unknown area "${S(area)}". Areas: ${areas.join(', ')}. Leave area out if none fits.`);
   return found;
 }
 
