@@ -15,7 +15,7 @@ crons = ["*/5 * * * *"]
 [[d1_databases]]
 binding = "DB"
 database_name = "life_os"
-database_id = "REPLACE_WITH_ID_FROM_wrangler_d1_create"
+database_id = "d4d1537e-1416-46f5-90cf-dd18d708ef27"
 migrations_dir = "migrations"
 
 [[queues.producers]]
