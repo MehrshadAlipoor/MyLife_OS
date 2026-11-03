@@ -1,5 +1,7 @@
 /**
  * Tools the chat model can call. Strict schemas (optional fields are nullable and still required);
+ * the API allows at most MAX_STRICT_UNION_PARAMS nullable fields across all strict tools, so
+ * update_task (the widest patch) is not strict and relies on the checks below.
  * every input is validated again here and a problem comes back as an is_error result the model can
  * fix. Writes go through insertRow/updateRow so /undo can revert them. The list is static, so the
  * request prefix (and its cache) stays stable.
@@ -30,11 +32,14 @@ const str = (description: string): Schema => ({ type: 'string', description });
 const orNull = (schema: Schema): Schema => ({ anyOf: [schema, { type: 'null' }] });
 const strEnum = (values: readonly string[], description: string): Schema => ({ type: 'string', enum: values, description });
 
-function tool(name: string, description: string, properties: Record<string, Schema>): BetaTool {
+/** API limit: strict tools may have at most 16 parameters with union types (anyOf / type arrays) in total. */
+export const MAX_STRICT_UNION_PARAMS = 16;
+
+function tool(name: string, description: string, properties: Record<string, Schema>, strict = true): BetaTool {
   return {
     name,
     description,
-    strict: true,
+    strict,
     input_schema: { type: 'object', properties, required: Object.keys(properties), additionalProperties: false }
   };
 }
@@ -63,7 +68,7 @@ export const TOOLS: BetaTool[] = [
     priority: orNull({ type: 'integer', enum: [1, 2, 3] }),
     status: orNull(strEnum(STATUSES, 'open | waiting (on someone else) | done | dropped')),
     notes: orNull(str('Replaces the notes'))
-  }),
+  }, false),
   tool('list_tasks', 'List tasks. today = due today or overdue; upcoming = next 7 days; area needs the area field; done_recently = finished in the last 7 days.', {
     filter: strEnum(FILTERS, 'Which tasks'),
     area: orNull(str('Area for filter=area'))
@@ -161,7 +166,10 @@ const handlers: Record<string, Handler> = {
   },
 
   async update_task(input, ctx) {
+    // Not a strict tool, so check the types the schema would otherwise guarantee.
     const id = Number(input.id);
+    if (!Number.isInteger(id)) throw new ToolError(`id must be a task number, got "${String(input.id)}"`);
+    if (input.priority != null && ![1, 2, 3].includes(input.priority as number)) throw new ToolError('priority must be 1, 2 or 3');
     const patch: Record<string, unknown> = {};
     if (S(input.title)) patch.title = S(input.title).slice(0, 300);
     if (input.area != null) patch.area = await checkArea(ctx.env, input.area);
