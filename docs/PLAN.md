@@ -37,7 +37,7 @@ Telegram ─webhook─▶ Worker fetch (/telegram)  — check secret header, own
 Cron */5 ─▶ scheduled: claim due reminders/routines (atomic UPDATE…RETURNING) ─▶ enqueue
 Routines (morning brief, weekly review) = one-shot Opus 5.5 calls; template fallback with no LLM
 Nightly ─▶ lean GitHub commit to myBlog1: Assistant/TASKS.md + "YYMMDD - life-os log.md"
-Weekly  ─▶ D1 JSON backup committed to life-os-bot
+Weekly  ─▶ D1 JSON backup committed to MyLife_OS
 ```
 
 - **Runtime:** a Cloudflare Worker in TypeScript, with `nodejs_compat` on (for `Buffer`) and `[observability]` enabled. It uses the same Cloudflare account as `phd-hunter-bot`.
@@ -138,7 +138,7 @@ Times are Europe/Rome and editable.
 | 21:30 daily | **Evening check-in** (template question, no LLM). His voice reply goes to Haiku, which logs it, completes tasks and moves leftovers to tomorrow |
 | Sun 18:00 | **Weekly review** (Opus): progress per area, wins and slips, next week's top 3 per area; sent to Telegram and written to the vault |
 | 23:30 daily | **Vault export** (one commit) |
-| Sun 03:00 | **D1 backup** (JSON dump committed to `life-os-bot/backups/`) |
+| Sun 03:00 | **D1 backup** (JSON dump committed to the `backups` branch of `MyLife_OS`) |
 
 **Scheduling rules:**
 - A routine fires when local time is past its target **and** `last_run_date` is before today, so a late or skipped cron still fires once.
@@ -185,7 +185,7 @@ Times are Europe/Rome and editable.
 
 Areas: `phd`, `lab`, `mms`, `mimmo`, `health`, `admin`, `personal`. They are stored in `state` and editable.
 
-## Repo layout: new private repo `MehrshadAlipoor/life-os-bot`
+## Repo layout: private repo `MehrshadAlipoor/MyLife_OS` (the Worker is named `life-os-bot`)
 
 ```
 wrangler.toml          # D1, Queue (+DLQ), AI bindings; cron */5; nodejs_compat; observability; vars
@@ -220,8 +220,8 @@ Between phases there is one week of real use: check `/status` for cost and CPU b
    - Create a new bot in @BotFather.
    - Claim the Max API credits, create a "life-os" workspace with a spend limit, and make an API key.
    - Get a DeepSeek key.
-   - Create a fine-grained GitHub token: `myBlog1` contents read/write, `life-os-bot` contents read/write.
-   - Create the empty private repo `life-os-bot` and install the Claude GitHub App on it, so it can be attached to the session for pushing.
+   - Create a fine-grained GitHub token: `myBlog1` contents read/write, `MyLife_OS` contents read/write.
+   - Create the empty private repo `MyLife_OS` and install the Claude GitHub App on it, so it can be attached to the session for pushing.
    - Run `wrangler d1 create`, `wrangler queues create` (main + DLQ), and `wrangler secret put` ×6.
 1. **MVP: text + voice.**
    - Build: webhook → queue → Haiku agent with the task, log, reminder and remember tools; voice; `/today`, `/tasks`, `/new`, `/undo`, `/status`; buttons; reminder cron; the DeepSeek ask-flow; the ⚠️ error path.
