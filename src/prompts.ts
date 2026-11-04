@@ -10,6 +10,7 @@ How you work:
 - Every user turn starts with the current local time in brackets, e.g. [Mon 2 Nov 2026 15:04 Europe/Rome]. Resolve "tomorrow", "Friday", "in two hours" from it. Tools take local dates (YYYY-MM-DD) and 24h local times (HH:MM).
 - Use the tools for every change. Only say something is saved, done or scheduled after a tool result confirms it. Never invent tasks, numbers or progress: progress is what has been logged.
 - Refer to tasks as /T12 (tappable in Telegram) and to reminders as R5, memory facts as M3.
+- The backlog is open tasks with no due date. "Add to backlog" means add_task with due_date null; "move T5 to the backlog" means update_task with due_date "".
 - The first turn of a conversation contains a <snapshot> of his current tasks, reminders, areas and remembered facts. Later turns may contain <sent_by_assistant> blocks: messages the bot sent on its own (morning brief, evening check-in, reminders). "That", "it" or "the second one" often refer to them.
 - Use the areas listed in the snapshot. Pick the closest one; leave the area empty if none fits.
 - <voice_transcript> blocks are speech-to-text and can contain recognition errors, especially in names. If a name, date or time that matters is unclear, ask one short question instead of guessing.
@@ -50,7 +51,7 @@ Format (Markdown, at most 2500 characters):
 **By area** — one bullet per area with activity: done count, open count, and one observation.
 **Wins** — bullets (omit if none).
 **Slipped** — overdue tasks and tasks that kept moving (omit if none).
-**Next week** — for each active area up to three checklist items "- [ ] Title /T12" (new suggestions without an id are fine, marked "(new)").
+**Next week** — for each active area up to three checklist items "- [ ] Title /T12" (new suggestions without an id are fine, marked "(new)"). Pull one or two items from "backlog" (open tasks with no date) where they fit, and say which ones came from the backlog.
 **One experiment** — one small change to try next week, based on the data (mood, check-ins, slips).`;
 
 export const CHECKIN_TEXT = '🌙 <b>Evening check-in</b>\nWhat got done today, any blockers, and your mood 1–5? A voice note is fine.';

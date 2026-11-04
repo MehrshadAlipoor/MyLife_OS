@@ -47,7 +47,7 @@ function tool(name: string, description: string, properties: Record<string, Sche
 const STATUSES = ['open', 'waiting', 'done', 'dropped'] as const;
 const LOG_KINDS = ['progress', 'win', 'blocker', 'mood', 'habit', 'note', 'checkin'] as const;
 const REPEATS = ['none', 'daily', 'weekdays', 'weekly'] as const;
-const FILTERS = ['today', 'overdue', 'upcoming', 'area', 'waiting', 'all_open', 'done_recently'] as const;
+const FILTERS = ['today', 'overdue', 'upcoming', 'area', 'waiting', 'all_open', 'done_recently', 'backlog'] as const;
 const PERIODS = ['today', 'week', 'month'] as const;
 
 export const TOOLS: BetaTool[] = [
@@ -69,7 +69,7 @@ export const TOOLS: BetaTool[] = [
     status: orNull(strEnum(STATUSES, 'open | waiting (on someone else) | done | dropped')),
     notes: orNull(str('Replaces the notes'))
   }, false),
-  tool('list_tasks', 'List tasks. today = due today or overdue; upcoming = next 7 days; area needs the area field; done_recently = finished in the last 7 days.', {
+  tool('list_tasks', 'List tasks. today = due today or overdue; upcoming = next 7 days; area needs the area field; done_recently = finished in the last 7 days; backlog = open tasks with no date (add the area field to limit it to one area).', {
     filter: strEnum(FILTERS, 'Which tasks'),
     area: orNull(str('Area for filter=area'))
   }),
@@ -195,7 +195,7 @@ const handlers: Record<string, Handler> = {
       tasks = await doneBetween(ctx.env.DB, new Date(ctx.now.getTime() - 7 * 86400_000).toISOString(), ctx.now.toISOString());
     } else {
       const active = await activeTasks(ctx.env.DB);
-      const area = filter === 'area' ? await checkArea(ctx.env, input.area) : null;
+      const area = filter === 'area' || (filter === 'backlog' && input.area) ? await checkArea(ctx.env, input.area) : null;
       const week = addDays(today, 7);
       tasks = active.filter(t => {
         switch (filter) {
@@ -204,6 +204,7 @@ const handlers: Record<string, Handler> = {
           case 'upcoming': return t.due_date != null && t.due_date >= today && t.due_date <= week;
           case 'area': return t.area === area;
           case 'waiting': return t.status === 'waiting';
+          case 'backlog': return t.status === 'open' && !t.due_date && (!area || t.area === area);
           default: return true;
         }
       });

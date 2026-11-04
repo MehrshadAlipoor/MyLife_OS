@@ -34,6 +34,19 @@ describe('tool schemas', () => {
 });
 
 describe('tasks', () => {
+  it('lists the backlog: open tasks with no date, optionally for one area', async () => {
+    await call('add_task', { title: 'Learn Docker', area: 'personal', due_date: null, due_time: null, priority: null, notes: null });
+    await call('add_task', { title: 'Read paper', area: 'phd', due_date: null, due_time: null, priority: null, notes: null });
+    await call('add_task', { title: 'Submit form', area: 'phd', due_date: '2026-11-05', due_time: null, priority: null, notes: null });
+    const all = String((await call('list_tasks', { filter: 'backlog', area: null })).content);
+    expect(all).toContain('Learn Docker');
+    expect(all).toContain('Read paper');
+    expect(all).not.toContain('Submit form');
+    const phd = String((await call('list_tasks', { filter: 'backlog', area: 'phd' })).content);
+    expect(phd).toContain('Read paper');
+    expect(phd).not.toContain('Learn Docker');
+  });
+
   it('adds a task, validating the area', async () => {
     const bad = await call('add_task', { title: 'Call Mimmo', area: 'clients', due_date: null, due_time: null, priority: null, notes: null });
     expect(bad.is_error).toBe(true);

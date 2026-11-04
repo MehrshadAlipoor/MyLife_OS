@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import worker, { processUpdates } from '../src/index';
-import { applyButton, bar, formatToday, parseCommand } from '../src/commands';
+import { applyButton, bar, formatBacklog, formatToday, parseCommand } from '../src/commands';
 import { insertRow } from '../src/db';
 import type { Task } from '../src/db';
 import { dailyLogPath, dueRoutines, routineClock, runCron, tasksMarkdown } from '../src/routines';
@@ -138,6 +138,24 @@ describe('buttons and commands', () => {
     expect(view.html.indexOf('late')).toBeLessThan(view.html.indexOf('today</'));
     expect(view.html).toContain('🟠');
     expect(view.keyboard[0]!.map(b => b.callback_data)).toEqual(['t:done:1', 't:done:2', 't:done:3']);
+  });
+
+  it('formats the backlog: undated open tasks by area, priority first', () => {
+    const base = { notes: null, status: 'open' as const, priority: 2, due_time: null, created_at: '', done_at: null, deleted_at: null, source: 'chat' };
+    const tasks: Task[] = [
+      { ...base, id: 1, title: 'dated', area: 'phd', due_date: '2026-11-09' },
+      { ...base, id: 2, title: 'read paper', area: 'phd', due_date: null },
+      { ...base, id: 3, title: 'urgent idea', area: 'phd', due_date: null, priority: 1 },
+      { ...base, id: 4, title: 'learn docker', area: 'personal', due_date: null },
+      { ...base, id: 5, title: 'waiting one', area: 'phd', due_date: null, status: 'waiting' }
+    ];
+    const html = formatBacklog(tasks, '2026-11-02', null);
+    expect(html).toContain('Backlog (3)');
+    expect(html).not.toContain('dated');
+    expect(html).not.toContain('waiting one');
+    expect(html.indexOf('urgent idea')).toBeLessThan(html.indexOf('read paper'));
+    expect(formatBacklog(tasks, '2026-11-02', 'personal')).not.toContain('read paper');
+    expect(formatBacklog([], '2026-11-02', null)).toContain('empty');
   });
 });
 

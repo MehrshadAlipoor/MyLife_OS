@@ -224,6 +224,7 @@ export async function weekData(env: Env, now: Date) {
     done: done.map(compactTask),
     overdue: tasks.filter(t => t.status === 'open' && t.due_date && t.due_date < today).map(compactTask),
     open: tasks.filter(t => t.status === 'open').slice(0, 40).map(compactTask),
+    backlog: tasks.filter(t => t.status === 'open' && !t.due_date).sort((a, b) => a.priority - b.priority || a.id - b.id).slice(0, 20).map(compactTask),
     waiting: tasks.filter(t => t.status === 'waiting').map(compactTask),
     logs: logs.map((l: LogRow) => ({ date: l.date, kind: l.kind, text: l.text, area: l.area, value: l.value }))
   };
