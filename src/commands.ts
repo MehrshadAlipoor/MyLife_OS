@@ -18,6 +18,7 @@ import { addDays, isTime, localParts, nextOccurrence, relativeDay, shortDate, we
 export const COMMANDS: [string, string][] = [
   ['today', 'agenda: overdue, due today, reminders'],
   ['tasks', 'open tasks by area (/tasks phd)'],
+  ['backlog', 'tasks with no date, by area (/backlog phd)'],
   ['week', 'progress this week'],
   ['plan', 'plan my day (AI)'],
   ['review', 'weekly review now (AI)'],
@@ -79,6 +80,27 @@ export function formatTasks(tasks: Task[], today: string, area: string | null): 
   }
   const lines = [`<b>🗂 Open tasks (${shown.length})</b>`];
   for (const [name, list] of groups) lines.push('', `<b>${esc(name)}</b>`, ...list.map(t => taskHtml(t, today)));
+  return lines.join('\n');
+}
+
+/** Open tasks with no date: the backlog, grouped by area, most important first. */
+export function formatBacklog(tasks: Task[], today: string, area: string | null): string {
+  const backlog = tasks
+    .filter(t => t.status === 'open' && !t.due_date && (!area || t.area === area))
+    .sort((a, b) => a.priority - b.priority || a.id - b.id);
+  if (!backlog.length) {
+    return area
+      ? `Nothing in the <i>${esc(area)}</i> backlog.`
+      : 'Your backlog is empty. Say "add to backlog: …" to park an idea without a date.';
+  }
+  const groups = new Map<string, Task[]>();
+  for (const t of backlog) {
+    const key = t.area ?? 'other';
+    groups.set(key, [...(groups.get(key) ?? []), t]);
+  }
+  const lines = [`<b>📥 Backlog (${backlog.length})</b>`];
+  for (const [name, list] of groups) lines.push('', `<b>${esc(name)}</b>`, ...list.map(t => taskHtml(t, today)));
+  lines.push('', '<i>Give one a day to schedule it, e.g. "move T5 to Friday".</i>');
   return lines.join('\n');
 }
 
@@ -178,6 +200,9 @@ export async function handleCommand(env: Env, name: string, args: string, now: D
     }
     case 'tasks':
       await sendHtml(env, formatTasks(await activeTasks(env.DB), today, args ? args.toLowerCase() : null));
+      return true;
+    case 'backlog':
+      await sendHtml(env, formatBacklog(await activeTasks(env.DB), today, args ? args.toLowerCase() : null));
       return true;
     case 'week':
       await sendHtml(env, formatWeek(await progressStats(env, weekStart(today), today, now), today));
