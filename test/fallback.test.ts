@@ -174,3 +174,29 @@ describe('/model', () => {
     expect(telegramCalls(calls).at(-1)!.body.text).toBe('Hi from GLM');
   });
 });
+
+describe('/model buttons', () => {
+  it('lists every OpenCode Go model as a button, marks the current one, and switches on tap', async () => {
+    const { handleCallback, handleCommand, OPENCODE_MODELS } = await import('../src/commands');
+    const calls = mockFetch();
+    await handleCommand(env, 'model', 'list', new Date());
+    const card = telegramCalls(calls).at(-1)!.body;
+    const buttons = card.reply_markup.inline_keyboard.flat() as { text: string; callback_data: string }[];
+    expect(buttons.filter(b => b.callback_data.startsWith('m:opencode:'))).toHaveLength(OPENCODE_MODELS.length);
+    expect(buttons.find(b => b.callback_data === 'm:deepseek')!.text).toBe('✓ DeepSeek');
+    expect(buttons.every(b => new TextEncoder().encode(b.callback_data).length <= 64)).toBe(true);
+    expect(buttons.some(b => b.callback_data.includes('-free'))).toBe(false);
+
+    await handleCallback(env, { id: 'q1', from: { id: 4242 }, data: 'm:opencode:glm-5.3-flash', message: { message_id: 7, chat: { id: 4242, type: 'private' } } }, new Date());
+    expect(await getState(env.DB, 'model_choice', null)).toEqual({ provider: 'opencode', model: 'glm-5.3-flash' });
+    const edited = calls.filter(c => c.url.endsWith('/editMessageText')).at(-1)!.body;
+    expect(edited.text).toContain('Main: OpenCode Go <code>glm-5.3-flash</code>');
+    const after = (edited.reply_markup.inline_keyboard.flat() as { text: string }[]).map(b => b.text);
+    expect(after).toContain('✓ glm-5.3-flash · $60');
+    expect(after).toContain('DeepSeek');
+    expect(calls.find(c => c.url.endsWith('/answerCallbackQuery'))!.body.text).toBe('OpenCode Go · glm-5.3-flash');
+
+    await handleCallback(await withModelChoice(env), { id: 'q2', from: { id: 4242 }, data: 'm:reset', message: { message_id: 7, chat: { id: 4242, type: 'private' } } }, new Date());
+    expect(await getState(env.DB, 'model_choice', null)).toBeNull();
+  });
+});

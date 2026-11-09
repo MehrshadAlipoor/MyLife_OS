@@ -96,7 +96,7 @@ Rough estimates for about 30 messages a day:
 | `/areas` | Show or set your life areas |
 | `/undo` | Shows the last task, reminder, log or memory change and reverts it after you confirm (routine and setting changes are changed back directly) |
 | `/new` | Start a fresh conversation (your data stays) |
-| `/model` | Show or switch the main provider and model: `/model opencode kimi-k3`, `/model deepseek`, `/model reset` |
+| `/model` | Shows the current model with tap-to-switch buttons for every OpenCode Go model (with its monthly allowance), DeepSeek, Claude and reset. Typed form: `/model opencode kimi-k3`, `/model deepseek`, `/model reset` |
 | `/status` | Provider, models, fallbacks, spend this month, last cron run, last error |
 
 ### Routines (Europe/Rome; change them with `/routine` or just ask)
