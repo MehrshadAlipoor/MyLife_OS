@@ -12,7 +12,7 @@ import type { Env, Job, TgUpdate } from './env';
 import { COMMANDS, handleCallback, handleCommand, parseCommand, QUEUED_COMMANDS } from './commands';
 import { all, first, run } from './db';
 import { continueTurn, runChatTurn } from './agent';
-import { ProviderUnavailable } from './llm';
+import { primaryProvider, providerName, ProviderUnavailable } from './llm';
 import { messageToBlocks } from './media';
 import { recordError, routineClock, runCron, runRoutine } from './routines';
 import { esc, sendHtml, sendMarkdown, tg, typing, warn } from './telegram';
@@ -68,10 +68,12 @@ async function setStatus(env: Env, ids: number[], status: 'done' | 'failed'): Pr
   if (ids.length) await run(env.DB, `UPDATE processed_updates SET status = ? WHERE update_id IN (${ids.map(() => '?').join(', ')})`, status, ...ids);
 }
 
-async function offerFallback(env: Env, reason: string): Promise<void> {
+async function offerFallback(env: Env, e: ProviderUnavailable): Promise<void> {
+  const reason = e.reason;
   const session = await first<{ id: number }>(env.DB, 'SELECT id FROM sessions WHERE closed = 0 ORDER BY id DESC LIMIT 1');
-  if (!env.DEEPSEEK_API_KEY || !session) {
-    await sendHtml(env, `⚡ Claude is unavailable (${esc(reason)}). Your message is saved; I'll answer it when you write again.`);
+  // DeepSeek is offered only as a fallback for Claude, never for itself.
+  if (e.provider === 'deepseek' || primaryProvider(env) === 'deepseek' || !env.DEEPSEEK_API_KEY || !session) {
+    await sendHtml(env, `⚡ ${providerName(e.provider)} is unavailable (${esc(reason)}). Your message is saved; I'll answer it when you write again.`);
     return;
   }
   const row = await first<{ id: number }>(env.DB, 'INSERT INTO pending_fallbacks (session_id, reason, created_at) VALUES (?, ?, ?) RETURNING id',
@@ -118,7 +120,7 @@ export async function processUpdates(env: Env, updates: TgUpdate[]): Promise<voi
   } catch (e) {
     if (e instanceof ProviderUnavailable) {
       await setStatus(env, todoIds, 'done');
-      await offerFallback(env, e.reason);
+      await offerFallback(env, e);
       return;
     }
     console.error('turn failed', e);
@@ -148,7 +150,7 @@ async function runJob(env: Env, job: Exclude<Job, { kind: 'update' }>): Promise<
     else await runRoutine(env, job.name, job.name === 'day_plan' ? new Date() : routineClock(job.date, env.TIMEZONE));
   } catch (e) {
     if (e instanceof ProviderUnavailable && job.kind === 'routine' && job.name === 'day_plan') {
-      await offerFallback(env, e.reason);
+      await offerFallback(env, e);
       return;
     }
     console.error(`job ${job.kind} failed`, e);

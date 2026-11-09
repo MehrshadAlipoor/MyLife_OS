@@ -10,7 +10,7 @@ import type { BetaContentBlockParam, BetaMessageParam, BetaTextBlockParam, BetaT
 import type { Env } from './env';
 import { activeTasks, all, first, getAreas, getState, memoryFacts, outboxAfter, pendingReminders, run } from './db';
 import type { OutboxRow } from './db';
-import { call, callClaude, textOf } from './llm';
+import { call, chatModel, primaryProvider, providerName, textOf } from './llm';
 import type { LlmRequest, Provider } from './llm';
 import { SUMMARY_PROMPT, SYSTEM_PROMPT } from './prompts';
 import { recentLogs, reminderLine, runTool, taskLine, TOOLS } from './tools';
@@ -38,8 +38,9 @@ export interface TurnResult {
   sessionId: number;
 }
 
-export async function configHash(model: string): Promise<string> {
-  const data = new TextEncoder().encode(JSON.stringify({ system: SYSTEM_PROMPT, tools: TOOLS, model }));
+export async function configHash(model: string, provider: Provider = 'claude'): Promise<string> {
+  // The provider joins the hash only when it isn't Claude, so existing Claude sessions keep their hash.
+  const data = new TextEncoder().encode(JSON.stringify({ system: SYSTEM_PROMPT, tools: TOOLS, model, ...(provider === 'claude' ? {} : { provider }) }));
   const digest = await crypto.subtle.digest('SHA-256', data);
   return [...new Uint8Array(digest)].slice(0, 8).map(b => b.toString(16).padStart(2, '0')).join('');
 }
@@ -84,9 +85,9 @@ async function summarize(env: Env, sessionId: number): Promise<string | null> {
     .slice(-60_000);
   if (!transcript) return null;
   try {
-    const res = await callClaude(env, {
+    const res = await call(env, primaryProvider(env), {
       kind: 'summary',
-      model: env.CHAT_MODEL,
+      model: chatModel(env),
       effort: 'low',
       system: SUMMARY_PROMPT,
       messages: [{ role: 'user', content: transcript }],
@@ -102,7 +103,7 @@ async function summarize(env: Env, sessionId: number): Promise<string | null> {
 
 /** The open session, or a new one; `carry` is a summary to seed it with when the old one got too long. */
 async function openSession(env: Env, now: Date): Promise<{ session: Session; isNew: boolean; carry: string | null }> {
-  const hash = await configHash(env.CHAT_MODEL);
+  const hash = await configHash(chatModel(env), primaryProvider(env));
   const current = await first<Session>(env.DB, 'SELECT * FROM sessions WHERE closed = 0 ORDER BY id DESC LIMIT 1');
   const reason = current ? sessionEndReason(current, now, hash, env.TIMEZONE) : 'none';
   if (current && !reason) return { session: current, isNew: false, carry: null };
@@ -171,7 +172,7 @@ export async function buildSnapshot(env: Env, now: Date, carry: string | null, r
  * to the session, then loop model ⇄ tools. ProviderUnavailable propagates; the user turn is
  * already stored, so a later DeepSeek retry (continueTurn) answers it.
  */
-export async function runChatTurn(env: Env, blocks: BetaContentBlockParam[], updateIds: number[], source: string, provider: Provider = 'claude'): Promise<TurnResult> {
+export async function runChatTurn(env: Env, blocks: BetaContentBlockParam[], updateIds: number[], source: string, provider: Provider = primaryProvider(env)): Promise<TurnResult> {
   const now = new Date();
   const tz = env.TIMEZONE;
   const { session, isNew, carry } = await openSession(env, now);
@@ -208,7 +209,7 @@ async function runLoop(env: Env, sessionId: number, messages: BetaMessageParam[]
   for (let round = 0; round < MAX_ROUNDS; round++) {
     const req: LlmRequest = {
       kind: 'chat',
-      model: env.CHAT_MODEL,
+      model: provider === 'claude' ? env.CHAT_MODEL : env.DEEPSEEK_MODEL,
       effort: 'low',
       system: SYSTEM_PROMPT,
       tools: TOOLS,
@@ -242,7 +243,8 @@ async function runLoop(env: Env, sessionId: number, messages: BetaMessageParam[]
       let reply = texts[texts.length - 1] || (usedTools ? '✅ Done.' : '…');
       if (res.stopReason === 'refusal') reply = "I can't help with that one.";
       if (res.stopReason === 'max_tokens') reply += '\n\n(cut off — ask me to continue)';
-      if (provider === 'deepseek') reply += '\n\n_⚡ DeepSeek_';
+      // Mark answers from the fallback provider, not from the one picked in PROVIDER.
+      if (provider !== primaryProvider(env)) reply += `\n\n_⚡ ${providerName(provider)}_`;
       return { reply, provider, sessionId };
     }
   }

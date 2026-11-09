@@ -8,7 +8,7 @@ import type { Env, RoutineName } from './env';
 import { activeTasks, addOutbox, all, doneBetween, getAreas, getState, logsBetween, memoryFacts, pendingReminders, run, setState } from './db';
 import type { LogRow, Reminder, Routine, Task } from './db';
 import { commitFiles, GENERATED_MARK, isGenerated, readPath } from './github';
-import { callClaude, ProviderUnavailable, routineModel, textOf } from './llm';
+import { call, primaryProvider, ProviderUnavailable, routineModel, textOf } from './llm';
 import { BRIEF_PROMPT, CHECKIN_TEXT, PLAN_REQUEST, REVIEW_PROMPT } from './prompts';
 import { doneButtons, formatToday, taskHtml } from './commands';
 import { runChatTurn } from './agent';
@@ -118,17 +118,17 @@ export async function runRoutine(env: Env, name: RoutineName | 'day_plan', now =
   }
 }
 
-/** Opus (or Haiku past the soft cap) for a one-shot routine text; tells the owner once a month when capped. */
+/** The routine model (or the chat model past the soft cap) for a one-shot routine text; tells the owner once a month when capped. */
 async function routineText(env: Env, kind: 'brief' | 'review', system: string, data: unknown, now: Date): Promise<string> {
   const { model, capped } = await routineModel(env, now);
   if (capped) {
     const month = localParts(now, env.TIMEZONE).date.slice(0, 7);
     if ((await getState<string | null>(env.DB, 'cap_notice', null)) !== month) {
       await setState(env.DB, 'cap_notice', month);
-      await sendHtml(env, `💸 This month's AI spend reached the $${esc(env.MONTHLY_CAP_USD)} soft cap, so routines now use ${esc(env.CHAT_MODEL)} until next month.`);
+      await sendHtml(env, `💸 This month's AI spend reached the $${esc(env.MONTHLY_CAP_USD)} soft cap, so routines now use the chat model until next month.`);
     }
   }
-  const res = await callClaude(env, {
+  const res = await call(env, primaryProvider(env), {
     kind,
     model,
     effort: kind === 'review' ? 'high' : 'medium',
@@ -166,7 +166,7 @@ export async function briefData(env: Env, now: Date) {
   };
 }
 
-/** The no-LLM brief: used when Claude is unavailable. */
+/** The no-LLM brief: used when the model provider is unavailable. */
 export function templateBrief(tasks: Task[], reminders: Reminder[], today: string, tz: string): { html: string; keyboard: Keyboard } {
   const view = formatToday(tasks, reminders, today, tz, null);
   return { html: `☀️ Good morning!\n\n${view.html}\n\n<i>What is the one thing that would make today a win?</i>`, keyboard: view.keyboard };
