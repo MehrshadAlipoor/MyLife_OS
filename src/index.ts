@@ -12,7 +12,7 @@ import type { Env, Job, TgUpdate } from './env';
 import { COMMANDS, handleCallback, handleCommand, parseCommand, QUEUED_COMMANDS } from './commands';
 import { all, first, run } from './db';
 import { continueTurn, runChatTurn } from './agent';
-import { primaryProvider, providerName, ProviderUnavailable } from './llm';
+import { primaryProvider, providerName, ProviderUnavailable, withModelChoice } from './llm';
 import { messageToBlocks } from './media';
 import { recordError, routineClock, runCron, runRoutine } from './routines';
 import { esc, sendHtml, sendMarkdown, tg, typing, warn } from './telegram';
@@ -71,14 +71,15 @@ async function setStatus(env: Env, ids: number[], status: 'done' | 'failed'): Pr
 async function offerFallback(env: Env, e: ProviderUnavailable): Promise<void> {
   const reason = e.reason;
   const session = await first<{ id: number }>(env.DB, 'SELECT id FROM sessions WHERE closed = 0 ORDER BY id DESC LIMIT 1');
-  // DeepSeek is offered only as a fallback for Claude, never for itself.
-  if (e.provider === 'deepseek' || primaryProvider(env) === 'deepseek' || !env.DEEPSEEK_API_KEY || !session) {
-    await sendHtml(env, `⚡ ${providerName(e.provider)} is unavailable (${esc(reason)}). Your message is saved; I'll answer it when you write again.`);
+  const what = e.tried.length > 1 ? 'No model is available' : `${providerName(e.provider)} is unavailable`;
+  // DeepSeek is offered (asking first) only for Claude as the main provider, and only if it wasn't already tried.
+  if (e.tried.includes('deepseek') || primaryProvider(env) !== 'claude' || !env.DEEPSEEK_API_KEY || !session) {
+    await sendHtml(env, `⚡ ${what} (${esc(reason)}). Your message is saved; I'll answer it when you write again.`);
     return;
   }
   const row = await first<{ id: number }>(env.DB, 'INSERT INTO pending_fallbacks (session_id, reason, created_at) VALUES (?, ?, ?) RETURNING id',
     session.id, reason, new Date().toISOString());
-  await sendHtml(env, `⚡ Claude is unavailable (${esc(reason)}).\nSend this via DeepSeek instead? That shares this conversation and your task context with DeepSeek.`, [[
+  await sendHtml(env, `⚡ ${what} (${esc(reason)}).\nSend this via DeepSeek instead? That shares this conversation and your task context with DeepSeek.`, [[
     { text: '⚡ Send via DeepSeek', callback_data: `fb:yes:${row?.id}` },
     { text: '⏳ Wait for Claude', callback_data: `fb:no:${row?.id}` }
   ]]);
@@ -171,16 +172,17 @@ async function onDeadLetter(env: Env, job: Job): Promise<void> {
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, rawEnv: Env): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname === '/setup' && request.method === 'GET') return setup(request, env);
+    if (url.pathname === '/setup' && request.method === 'GET') return setup(request, rawEnv);
     if (url.pathname === '/' && request.method === 'GET') return new Response('life-os-bot ok');
     if (url.pathname !== '/telegram' || request.method !== 'POST') return new Response('Not found', { status: 404 });
-    if (!env.WEBHOOK_SECRET || request.headers.get('X-Telegram-Bot-Api-Secret-Token') !== env.WEBHOOK_SECRET) {
+    if (!rawEnv.WEBHOOK_SECRET || request.headers.get('X-Telegram-Bot-Api-Secret-Token') !== rawEnv.WEBHOOK_SECRET) {
       return new Response('Forbidden', { status: 403 });
     }
     const update = (await request.json().catch(() => null)) as TgUpdate | null;
     if (update?.update_id != null) {
+      const env = await withModelChoice(rawEnv);
       try {
         await onUpdate(env, update, new Date());
       } catch (e) {
@@ -193,7 +195,8 @@ export default {
     return new Response('ok');
   },
 
-  async queue(batch: MessageBatch<Job>, env: Env): Promise<void> {
+  async queue(batch: MessageBatch<Job>, rawEnv: Env): Promise<void> {
+    const env = await withModelChoice(rawEnv);
     if (batch.queue === DEAD_LETTER_QUEUE) {
       for (const m of batch.messages) await onDeadLetter(env, m.body).catch(e => console.error('dlq', e));
       batch.ackAll();
@@ -207,7 +210,8 @@ export default {
     batch.ackAll();
   },
 
-  async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
+  async scheduled(_controller: ScheduledController, rawEnv: Env): Promise<void> {
+    const env = await withModelChoice(rawEnv);
     try {
       await runCron(env);
     } catch (e) {

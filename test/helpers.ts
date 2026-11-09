@@ -35,6 +35,10 @@ export function testEnv(overrides: Partial<Env> = {}): TestEnv {
     PROVIDER: 'claude',
     ANTHROPIC_API_KEY: 'sk-ant-test',
     DEEPSEEK_API_KEY: 'sk-ds-test',
+    // No automatic fallback unless a test asks for one.
+    FALLBACK_PROVIDERS: '',
+    OPENCODE_MODEL: 'claude-haiku-5-5',
+    OPENCODE_API_KEY: 'sk-oc-test',
     GITHUB_TOKEN: undefined,
     ...overrides
   } as TestEnv;
@@ -88,6 +92,7 @@ export function mockFetch(route: Route = () => undefined): FetchCall[] {
 
 export const isClaude = (c: FetchCall) => c.url.startsWith('https://api.anthropic.com/');
 export const isDeepSeek = (c: FetchCall) => c.url.startsWith('https://api.deepseek.com/');
+export const isOpenCode = (c: FetchCall) => c.url.startsWith('https://opencode.ai/inference/go/');
 export const telegramCalls = (calls: FetchCall[], method = 'sendMessage') => calls.filter(c => c.url.endsWith(`/${method}`));
 
 export function claudeReply(content: unknown[], stop_reason = 'end_turn', model = 'claude-haiku-5-5'): Response {

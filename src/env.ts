@@ -13,6 +13,12 @@ export interface Env {
   DEEPSEEK_MODEL: string;
   /** Routines (brief, review) on DeepSeek; falls back to DEEPSEEK_MODEL when empty. */
   DEEPSEEK_ROUTINE_MODEL?: string;
+  /** Model on OpenCode Go, e.g. "claude-haiku-5-5" or "kimi-k3" (ids: opencode.ai/docs/go). */
+  OPENCODE_MODEL: string;
+  /** Routines on OpenCode Go; falls back to OPENCODE_MODEL when empty. */
+  OPENCODE_ROUTINE_MODEL?: string;
+  /** Providers tried automatically, in order, when the main one fails: "opencode", "deepseek", "claude". */
+  FALLBACK_PROVIDERS?: string;
   MONTHLY_CAP_USD: string;
   VAULT_REPO: string;
   VAULT_BRANCH: string;
@@ -26,7 +32,11 @@ export interface Env {
   /** Needed when PROVIDER is "claude", and for reading photos (DeepSeek can't see images). */
   ANTHROPIC_API_KEY?: string;
   DEEPSEEK_API_KEY?: string;
+  /** OpenCode Go API key (opencode.ai/console), for PROVIDER or FALLBACK_PROVIDERS = "opencode". */
+  OPENCODE_API_KEY?: string;
   GITHUB_TOKEN?: string;
+  /** Set when /model overrides the deployed provider/model: the env as deployed. */
+  DEPLOYED?: Env;
 }
 
 export type RoutineName = 'morning_brief' | 'evening_checkin' | 'weekly_review' | 'vault_export' | 'backup';

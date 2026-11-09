@@ -8,7 +8,7 @@ import type { Env, RoutineName } from './env';
 import { activeTasks, addOutbox, all, doneBetween, getAreas, getState, logsBetween, memoryFacts, pendingReminders, run, setState } from './db';
 import type { LogRow, Reminder, Routine, Task } from './db';
 import { commitFiles, GENERATED_MARK, isGenerated, readPath } from './github';
-import { call, primaryProvider, ProviderUnavailable, routineModel, textOf } from './llm';
+import { callWithFallback, ProviderUnavailable, routineModel, textOf } from './llm';
 import { BRIEF_PROMPT, CHECKIN_TEXT, PLAN_REQUEST, REVIEW_PROMPT } from './prompts';
 import { doneButtons, formatToday, taskHtml } from './commands';
 import { runChatTurn } from './agent';
@@ -128,7 +128,7 @@ async function routineText(env: Env, kind: 'brief' | 'review', system: string, d
       await sendHtml(env, `💸 This month's AI spend reached the $${esc(env.MONTHLY_CAP_USD)} soft cap, so routines now use the chat model until next month.`);
     }
   }
-  const res = await call(env, primaryProvider(env), {
+  const res = await callWithFallback(env, {
     kind,
     model,
     effort: kind === 'review' ? 'high' : 'medium',
