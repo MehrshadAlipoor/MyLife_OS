@@ -2,28 +2,30 @@
 
 Talk to it by **text, voice note (English or Persian) or photo**. It keeps your tasks, reminders and progress, sends a morning brief and an evening check-in, writes a weekly review, and exports everything to your Obsidian vault each night.
 
-- **Chat:** Claude Haiku 5.5.
-- **Routines** (morning brief, weekly review): Claude Opus 5.5.
-- **DeepSeek V4 Flash:** if Claude is down or out of credits, the bot *asks you* before sending anything there.
+- **Provider:** set `PROVIDER` in `wrangler.toml`, then `npx wrangler deploy`.
+  - `deepseek` (the default): DeepSeek Flash for chat and photos, DeepSeek V4 Pro for the morning brief and weekly review.
+  - `claude`: Claude Haiku 5.5 for chat and Claude Opus 5.5 for routines. If Claude is down or out of credits, the bot *asks you* before sending anything to DeepSeek.
 - **Hosting:** everything runs on free tiers: a Cloudflare Worker, D1 (SQLite), Queues, Workers AI (Whisper), and GitHub for vault files and backups.
 
 ```
 Telegram → Worker /telegram ─┬─ /commands + buttons: answered at once (database only, no AI)
-                             └─ text / voice / photo → queue → Whisper / vision → Claude + tools ⇄ D1
+                             └─ text / voice / photo → queue → Whisper / vision → DeepSeek or Claude + tools ⇄ D1
 cron every 5 min → reminders now; brief, check-in, review, vault export, backup via the queue
 ```
 
 ## Cost
 
-| Item | Monthly cost |
-|---|---|
-| Chat (Haiku) | ≈ $0.003 per message |
-| Routines (Opus) | ≈ $3–5 |
-| **Total** | **≈ $5–10**, paid from the $100/month API credits included with your Max plan |
+Rough estimates for about 30 messages a day:
 
-- `/status` shows this month's spend.
+| Item | DeepSeek (`PROVIDER = "deepseek"`) | Claude (`PROVIDER = "claude"`) |
+|---|---|---|
+| Chat | ≈ $0.003 per message (Flash) | ≈ $0.003 per message (Haiku) |
+| Routines | ≈ $1 (V4 Pro) | ≈ $3–5 (Opus) |
+| **Total** | **≈ $3–5**, from your DeepSeek balance; off-peak hours (Beijing time) cost half | **≈ $6–8**, pay-as-you-go API credits |
+
+- `/status` shows the provider and this month's spend (an estimate; DeepSeek is counted at peak prices).
 - `MONTHLY_CAP_USD` in `wrangler.toml` (default $40) is a soft cap: past it, routines switch to Haiku and you get one message about it.
-- Also set a **hard spend limit** on the Console workspace (step 2 below).
+- On Claude, also set a **hard spend limit** on the Console workspace (step 2 below). DeepSeek is prepaid, so it simply stops at zero balance.
 
 ## One-time setup (about 90 minutes, PowerShell on the laptop)
 
@@ -31,13 +33,13 @@ cron every 5 min → reminders now; brief, check-in, review, vault export, backu
    - This must be a *new* bot: the PhD finder's bot already uses its own webhook.
    - Send any message to **@userinfobot**; it replies with your user id.
 
-2. **Claude API credits and key.**
+2. **Claude API credits and key** (only for `PROVIDER = "claude"`; skip it on DeepSeek).
    1. On claude.ai, go to **Settings → Billing → API credits** and link a Console organization. Credits then arrive monthly; no card is needed.
    2. In the Console (platform.claude.com), create a workspace **life-os**.
    3. Set the workspace's spend limit (e.g. $40/month).
    4. Create an API key *in that workspace*.
 
-3. **DeepSeek key** (optional; without it the bot just waits for Claude). Create it at platform.deepseek.com.
+3. **DeepSeek key** (required for `PROVIDER = "deepseek"`; on Claude it's the optional fallback). Create it at platform.deepseek.com.
 
 4. **GitHub token for the vault and backups** (optional at first; the vault export and backup are skipped without it).
    - Go to GitHub → Settings → Developer settings → **Fine-grained tokens**.
@@ -55,8 +57,8 @@ cron every 5 min → reminders now; brief, check-in, review, vault export, backu
    npm run db:migrate
    npx wrangler secret put TELEGRAM_BOT_TOKEN   # from step 1
    npx wrangler secret put OWNER_ID             # your user id from @userinfobot
-   npx wrangler secret put ANTHROPIC_API_KEY    # from step 2
-   npx wrangler secret put DEEPSEEK_API_KEY     # from step 3 (optional)
+   npx wrangler secret put DEEPSEEK_API_KEY     # from step 3
+   npx wrangler secret put ANTHROPIC_API_KEY    # from step 2 (only for PROVIDER = "claude")
    npx wrangler secret put GITHUB_TOKEN         # from step 4 (optional)
    [guid]::NewGuid().ToString('N')              # prints a random string; copy it
    npx wrangler secret put WEBHOOK_SECRET       # paste that string
@@ -88,15 +90,15 @@ cron every 5 min → reminders now; brief, check-in, review, vault export, backu
 | `/areas` | Show or set your life areas |
 | `/undo` | Shows the last task, reminder, log or memory change and reverts it after you confirm (routine and setting changes are changed back directly) |
 | `/new` | Start a fresh conversation (your data stays) |
-| `/status` | Models, spend this month, Claude health, last cron run, last error |
+| `/status` | Provider, models, spend this month, last cron run, last error |
 
 ### Routines (Europe/Rome; change them with `/routine` or just ask)
 
 | Routine | Default time | What happens |
 |---|---|---|
-| `morning_brief` | 08:00 weekdays | Opus picks your Top 3 with first steps and lists fixed blocks. If Claude is down you get a template brief instead |
+| `morning_brief` | 08:00 weekdays | The routine model picks your Top 3 with first steps and lists fixed blocks. If the provider is down you get a template brief instead |
 | `evening_checkin` | 21:30 | "What got done, blockers, mood 1–5?" Answer by voice: it logs everything, ticks off tasks, and moves leftovers to tomorrow |
-| `weekly_review` | Sun 18:00 | Opus review per area, sent to Telegram and saved to the vault |
+| `weekly_review` | Sun 18:00 | A review per area by the routine model, sent to Telegram and saved to the vault |
 | `vault_export` | 23:30 | One commit to `myBlog1` |
 | `backup` | Sun 03:00 | The D1 data as JSON, committed to the `backups` branch of this repo |
 
@@ -115,8 +117,8 @@ It never overwrites a note without that marker, so your own notes are safe. Obsi
 ## Privacy
 
 - Your data lives in your Cloudflare D1 database and your private GitHub repos.
-- Messages go to Anthropic's API.
-- Messages go to DeepSeek only after you tap **Send via DeepSeek** on a specific message. Routines never use DeepSeek.
+- With `PROVIDER = "deepseek"`, messages, photos and routine data go to DeepSeek's API.
+- With `PROVIDER = "claude"`, they go to Anthropic's API, and to DeepSeek only after you tap **Send via DeepSeek** on a specific message. Routines never use DeepSeek then.
 - Forwarded messages, text read from photos, and vault notes are treated as data, never as instructions.
 - Changes to tasks, reminders, logs and memory are logged, and `/undo` reverts them after you confirm.
 

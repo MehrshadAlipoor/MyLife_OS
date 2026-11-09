@@ -1,7 +1,10 @@
 /**
- * Model calls. Claude (Haiku for chat, Opus for routines) through the Anthropic SDK; DeepSeek
- * through its Anthropic-compatible endpoint, only after the owner taps "Send via DeepSeek".
- * Also: one retry on overload, a circuit breaker, the DeepSeek request sanitiser, and usage cost.
+ * Model calls. PROVIDER in wrangler.toml picks the main provider:
+ * - "deepseek": chat, summaries and routines all go to DEEPSEEK_MODEL through DeepSeek's
+ *   Anthropic-compatible endpoint. Photos still need Claude (DeepSeek can't read images).
+ * - "claude": Haiku for chat, Opus for routines through the Anthropic SDK; DeepSeek only after
+ *   the owner taps "Send via DeepSeek".
+ * Also: one retry on overload, a circuit breaker for Claude, the DeepSeek request sanitiser, and usage cost.
  */
 
 import Anthropic from '@anthropic-ai/sdk';
@@ -21,11 +24,23 @@ export type Provider = 'claude' | 'deepseek';
 export type CallKind = 'chat' | 'vision' | 'summary' | 'brief' | 'review';
 export type Effort = 'low' | 'medium' | 'high';
 
-/** Claude can't be used right now (outage, credits, key, breaker): the caller may offer DeepSeek. */
+/** The provider can't be used right now (outage, credits, key, breaker): the caller may offer DeepSeek. */
 export class ProviderUnavailable extends Error {
-  constructor(readonly reason: string) {
+  constructor(readonly reason: string, readonly provider: Provider = 'claude') {
     super(reason);
   }
+}
+
+/** The provider that answers by default, from PROVIDER (anything but "claude" means DeepSeek). */
+export function primaryProvider(env: Env): Provider {
+  return env.PROVIDER?.trim().toLowerCase() === 'claude' ? 'claude' : 'deepseek';
+}
+
+export const providerName = (p: Provider) => (p === 'claude' ? 'Claude' : 'DeepSeek');
+
+/** The model that answers chat on the main provider. */
+export function chatModel(env: Env): string {
+  return primaryProvider(env) === 'claude' ? env.CHAT_MODEL : env.DEEPSEEK_MODEL;
 }
 
 export interface LlmRequest {
@@ -86,7 +101,10 @@ const PRICES: [prefix: string, price: Price][] = [
   ['claude-haiku-5-5', { input: 0.1, output: 0.5, cacheRead: 0.01 }],
   ['claude-sonnet-5-5', { input: 2, output: 10, cacheRead: 0.2 }],
   ['claude-opus-5-5', { input: 4, output: 20, cacheRead: 0.2 }],
-  ['deepseek', { input: 0.14, output: 0.28, cacheRead: 0.028 }]
+  // DeepSeek bills in CNY with an off-peak half price; these are the peak prices at ~7.1 CNY/USD
+  // (Flash 2/8/0.04 元, Pro 9/27/0.3 元 per M), so /status errs high.
+  ['deepseek-v4-pro', { input: 1.27, output: 3.8, cacheRead: 0.042 }],
+  ['deepseek', { input: 0.28, output: 1.13, cacheRead: 0.006 }]
 ];
 const FALLBACK_PRICE: Price = { input: 4, output: 20, cacheRead: 0.2 };
 
@@ -118,11 +136,15 @@ export async function monthToDateUsd(env: Env, now = new Date()): Promise<number
   return row?.usd ?? 0;
 }
 
-/** Routines run on ROUTINE_MODEL until the month's spend reaches MONTHLY_CAP_USD, then on CHAT_MODEL. */
+/**
+ * Routines run on the routine model until the month's spend reaches MONTHLY_CAP_USD, then on the
+ * chat model: ROUTINE_MODEL / CHAT_MODEL on Claude, DEEPSEEK_ROUTINE_MODEL / DEEPSEEK_MODEL on DeepSeek.
+ */
 export async function routineModel(env: Env, now = new Date()): Promise<{ model: string; capped: boolean }> {
   const cap = Number(env.MONTHLY_CAP_USD) || Infinity;
   const capped = (await monthToDateUsd(env, now)) >= cap;
-  return { model: capped ? env.CHAT_MODEL : env.ROUTINE_MODEL, capped };
+  const routine = primaryProvider(env) === 'claude' ? env.ROUTINE_MODEL : env.DEEPSEEK_ROUTINE_MODEL || env.DEEPSEEK_MODEL;
+  return { model: capped ? chatModel(env) : routine, capped };
 }
 
 // ---------------------------------------------------------------- circuit breaker
@@ -182,6 +204,7 @@ const bindingRejected = (e: unknown) => e instanceof Anthropic.BadRequestError &
 // ---------------------------------------------------------------- calls
 
 export async function callClaude(env: Env, req: LlmRequest): Promise<LlmResult> {
+  if (!env.ANTHROPIC_API_KEY) throw new ProviderUnavailable('no Claude API key is set');
   const b = await breakerState(env);
   if (b.openUntil > Date.now()) {
     throw new ProviderUnavailable(`paused after repeated errors, retrying at ${localTime(new Date(b.openUntil), env.TIMEZONE)}`);
@@ -238,8 +261,11 @@ function blockText(content: unknown): string {
   return content.map(b => (b && typeof b === 'object' && 'text' in b ? String((b as { text: unknown }).text) : '')).join('\n');
 }
 
-/** Keep only plain text / tool_use / tool_result blocks, with no Claude-only fields. */
-export function plainBlocks(content: string | readonly unknown[]): BetaContentBlockParam[] {
+/**
+ * Keep only plain text / tool_use / tool_result blocks, with no Claude-only fields. Images are kept
+ * only when asked (DeepSeek Flash reads images in user turns), otherwise replaced by a note.
+ */
+export function plainBlocks(content: string | readonly unknown[], keepImages = false): BetaContentBlockParam[] {
   if (typeof content === 'string') return [{ type: 'text', text: content }];
   const out: BetaContentBlockParam[] = [];
   for (const raw of content) {
@@ -260,7 +286,7 @@ export function plainBlocks(content: string | readonly unknown[]): BetaContentBl
         });
         break;
       case 'image':
-        out.push({ type: 'text', text: '[image omitted]' });
+        out.push(keepImages ? ({ type: 'image', source: b.source } as BetaContentBlockParam) : { type: 'text', text: '[image omitted]' });
         break;
       default:
         // thinking, redacted_thinking, fallback, ...: Claude-only, dropped
@@ -269,6 +295,9 @@ export function plainBlocks(content: string | readonly unknown[]): BetaContentBl
   }
   return out;
 }
+
+/** The DeepSeek model for a request: its own model if it names a DeepSeek one, else DEEPSEEK_MODEL. */
+export const deepSeekModel = (env: Env, model: string) => (model.startsWith('deepseek') ? model : env.DEEPSEEK_MODEL);
 
 /**
  * The same request for DeepSeek: no thinking, effort, betas, fallbacks, cache_control or strict
@@ -280,7 +309,7 @@ export function toDeepSeek(req: LlmRequest, model: string): Anthropic.MessageCre
     max_tokens: req.maxTokens,
     system: req.system,
     messages: req.messages.map(m => {
-      const content = plainBlocks(m.content as string | unknown[]);
+      const content = plainBlocks(m.content as string | unknown[], m.role === 'user');
       return { role: m.role, content: content.length ? content : [{ type: 'text', text: '…' }] } as Anthropic.MessageParam;
     }),
     ...(req.tools?.length
@@ -296,14 +325,23 @@ export function toDeepSeek(req: LlmRequest, model: string): Anthropic.MessageCre
 }
 
 export async function callDeepSeek(env: Env, req: LlmRequest): Promise<LlmResult> {
-  if (!env.DEEPSEEK_API_KEY) throw new Error('DEEPSEEK_API_KEY is not set');
+  if (!env.DEEPSEEK_API_KEY) throw new ProviderUnavailable('no DeepSeek API key is set', 'deepseek');
   const client = new Anthropic({ apiKey: env.DEEPSEEK_API_KEY, baseURL: DEEPSEEK_BASE_URL, maxRetries: 1, timeout: req.timeoutMs });
-  const msg = await client.messages.create(toDeepSeek(req, env.DEEPSEEK_MODEL));
-  const t = await logUsage(env, 'deepseek', env.DEEPSEEK_MODEL, req.kind, msg.usage as unknown as Record<string, unknown>);
+  const model = deepSeekModel(env, req.model);
+  let msg: Anthropic.Message;
+  try {
+    msg = await client.messages.create(toDeepSeek(req, model));
+  } catch (e) {
+    // DeepSeek answers in the Anthropic error format, so the same reasons apply (402 = out of balance).
+    const reason = unavailableReason(e);
+    if (reason) throw new ProviderUnavailable(reason, 'deepseek');
+    throw e;
+  }
+  const t = await logUsage(env, 'deepseek', model, req.kind, msg.usage as unknown as Record<string, unknown>);
   const content = plainBlocks(msg.content as unknown[]);
   return {
     provider: 'deepseek',
-    model: env.DEEPSEEK_MODEL,
+    model,
     content: content.length ? content : [{ type: 'text', text: '…' }],
     stopReason: msg.stop_reason,
     promptTokens: t.input + t.cacheRead + t.cacheWrite

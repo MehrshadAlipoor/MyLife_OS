@@ -6,9 +6,13 @@ export interface Env {
   AI: Ai;
 
   TIMEZONE: string;
+  /** Which model provider answers chat and writes routines: "deepseek" or "claude". */
+  PROVIDER: string;
   CHAT_MODEL: string;
   ROUTINE_MODEL: string;
   DEEPSEEK_MODEL: string;
+  /** Routines (brief, review) on DeepSeek; falls back to DEEPSEEK_MODEL when empty. */
+  DEEPSEEK_ROUTINE_MODEL?: string;
   MONTHLY_CAP_USD: string;
   VAULT_REPO: string;
   VAULT_BRANCH: string;
@@ -19,7 +23,8 @@ export interface Env {
   /** Your Telegram user id; in a private chat it is also the chat id. */
   OWNER_ID: string;
   WEBHOOK_SECRET: string;
-  ANTHROPIC_API_KEY: string;
+  /** Needed when PROVIDER is "claude", and for reading photos (DeepSeek can't see images). */
+  ANTHROPIC_API_KEY?: string;
   DEEPSEEK_API_KEY?: string;
   GITHUB_TOKEN?: string;
 }

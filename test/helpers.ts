@@ -31,6 +31,8 @@ export function testEnv(overrides: Partial<Env> = {}): TestEnv {
     TELEGRAM_BOT_TOKEN: 'TEST_TOKEN',
     OWNER_ID: String(OWNER),
     WEBHOOK_SECRET: 'hook-secret',
+    // Most tests cover the Claude path; DeepSeek-as-main tests override PROVIDER.
+    PROVIDER: 'claude',
     ANTHROPIC_API_KEY: 'sk-ant-test',
     DEEPSEEK_API_KEY: 'sk-ds-test',
     GITHUB_TOKEN: undefined,

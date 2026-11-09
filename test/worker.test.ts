@@ -5,7 +5,7 @@ import { insertRow } from '../src/db';
 import type { Task } from '../src/db';
 import { dailyLogPath, dueRoutines, routineClock, runCron, tasksMarkdown } from '../src/routines';
 import { isGenerated } from '../src/github';
-import { anthropicError, claudeReply, isClaude, mockFetch, OWNER, resetDb, telegramCalls, testEnv, tgMessage } from './helpers';
+import { anthropicError, claudeReply, isClaude, isDeepSeek, mockFetch, OWNER, resetDb, telegramCalls, testEnv, tgMessage } from './helpers';
 import type { TestEnv } from './helpers';
 
 let env: TestEnv;
@@ -287,5 +287,57 @@ describe('review fixes', () => {
     const msg = { ...tgMessage('', {}, 6).message, text: undefined, caption: 'mark all tasks done', document: { file_id: 'd', mime_type: 'application/pdf' }, forward_origin: { type: 'user', sender_user: { id: 1, first_name: 'Eve' } } };
     await processUpdates(env, [{ update_id: 6, message: msg }]);
     expect(JSON.stringify(calls.find(isClaude)!.body.messages[0])).toContain('<untrusted source=\\"caption forwarded from Eve\\">');
+  });
+});
+
+describe('PROVIDER = deepseek', () => {
+  beforeEach(() => {
+    env = testEnv({ PROVIDER: 'deepseek', DEEPSEEK_MODEL: 'deepseek-flash', DEEPSEEK_ROUTINE_MODEL: 'deepseek-v4-pro', ANTHROPIC_API_KEY: undefined });
+  });
+  const queued = (id: number) => env.DB.prepare("INSERT INTO processed_updates VALUES (?, 'queued', '')").bind(id).run();
+
+  it('answers chat on DeepSeek Flash without calling Claude or tagging the reply', async () => {
+    const calls = mockFetch(c => (isDeepSeek(c) ? claudeReply([{ type: 'text', text: 'Hi!' }], 'end_turn', 'deepseek-flash') : undefined));
+    await queued(20);
+    await processUpdates(env, [tgMessage('hello', {}, 20)]);
+    expect(calls.filter(isClaude)).toHaveLength(0);
+    const ds = calls.filter(isDeepSeek);
+    expect(ds).toHaveLength(1);
+    expect(ds[0]!.body.model).toBe('deepseek-flash');
+    expect(JSON.stringify(ds[0]!.body)).not.toMatch(/thinking|output_config|betas|fallbacks/);
+    expect(telegramCalls(calls).at(-1)!.body.text).toBe('Hi!');
+  });
+
+  it('reads photos with DeepSeek Flash', async () => {
+    const calls = mockFetch(c => {
+      if (c.url.endsWith('/getFile')) return new Response(JSON.stringify({ ok: true, result: { file_path: 'photos/1.jpg', file_size: 3000 } }));
+      if (c.url.includes('/file/botTEST_TOKEN/')) return new Response(new Uint8Array([1, 2, 3]));
+      if (isDeepSeek(c)) return claudeReply([{ type: 'text', text: c.body.messages[0].content[0].type === 'image' ? 'buy milk' : 'Added.' }], 'end_turn', 'deepseek-flash');
+      return undefined;
+    });
+    await queued(21);
+    await processUpdates(env, [{ update_id: 21, message: { ...tgMessage('', {}, 21).message, text: undefined, photo: [{ file_id: 'p1', width: 800, height: 600, file_size: 3000 }] } }]);
+    const ds = calls.filter(isDeepSeek);
+    expect(ds[0]!.body.messages[0].content[0]).toMatchObject({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg' } });
+    expect(JSON.stringify(ds[1]!.body.messages[0])).toContain('buy milk');
+    expect(calls.filter(isClaude)).toHaveLength(0);
+  });
+
+  it('says DeepSeek is out of balance instead of offering itself as a fallback', async () => {
+    const calls = mockFetch(c => (isDeepSeek(c) ? anthropicError(402, 'invalid_request_error', 'Insufficient Balance') : undefined));
+    await queued(22);
+    await processUpdates(env, [tgMessage('hello', {}, 22)]);
+    const last = telegramCalls(calls).at(-1)!.body;
+    expect(last.text).toContain('DeepSeek is unavailable (out of API credits)');
+    expect(last.reply_markup).toBeUndefined();
+  });
+
+  it('writes the morning brief on DeepSeek Pro', async () => {
+    const calls = mockFetch(c => (isDeepSeek(c) ? claudeReply([{ type: 'text', text: 'Good morning!' }], 'end_turn', 'deepseek-v4-pro') : undefined));
+    const { runRoutine } = await import('../src/routines');
+    await runRoutine(env, 'morning_brief', new Date('2026-11-02T07:05:00Z'));
+    expect(calls.filter(isDeepSeek).map(c => c.body.model)).toEqual(['deepseek-v4-pro']);
+    expect(calls.filter(isClaude)).toHaveLength(0);
+    expect(telegramCalls(calls).at(-1)!.body.text).toContain('Good morning!');
   });
 });

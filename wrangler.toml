@@ -1,6 +1,7 @@
 # Life-OS Telegram assistant (Cloudflare Workers, free plan). Setup: README.md
 # Secrets (npx wrangler secret put <NAME>):
-#   TELEGRAM_BOT_TOKEN, OWNER_ID, WEBHOOK_SECRET, ANTHROPIC_API_KEY, DEEPSEEK_API_KEY, GITHUB_TOKEN
+#   TELEGRAM_BOT_TOKEN, OWNER_ID, WEBHOOK_SECRET, DEEPSEEK_API_KEY, GITHUB_TOKEN
+#   ANTHROPIC_API_KEY (only when PROVIDER = "claude")
 name = "life-os-bot"
 main = "src/index.ts"
 compatibility_date = "2026-10-01"
@@ -41,9 +42,15 @@ remote = true
 
 [vars]
 TIMEZONE = "Europe/Rome"
+# Who answers: "deepseek" (chat, photos and routines on DeepSeek) or "claude" (Claude, with DeepSeek
+# offered only as a fallback you approve per message). Change it and `npx wrangler deploy`.
+PROVIDER = "deepseek"
+# Used when PROVIDER = "claude"
 CHAT_MODEL = "claude-haiku-5-5"
 ROUTINE_MODEL = "claude-opus-5-5"
-DEEPSEEK_MODEL = "deepseek-v4-flash"
+# Used when PROVIDER = "deepseek" (DEEPSEEK_MODEL is also the Claude fallback). Flash reads images; Pro doesn't.
+DEEPSEEK_MODEL = "deepseek-flash"
+DEEPSEEK_ROUTINE_MODEL = "deepseek-v4-pro"
 MONTHLY_CAP_USD = "40"
 VAULT_REPO = "MehrshadAlipoor/myBlog1"
 VAULT_BRANCH = "main"

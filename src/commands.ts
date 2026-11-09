@@ -8,7 +8,7 @@ import { ROUTINE_NAMES } from './env';
 import { activeTasks, applyUndo, first, getAreas, getState, getTask, insertRow, peekUndo, pendingReminders, routines, run, setState, updateRow } from './db';
 import type { Reminder, Routine, Task } from './db';
 import { closeSession } from './agent';
-import { breakerState, monthToDateUsd } from './llm';
+import { breakerState, monthToDateUsd, primaryProvider } from './llm';
 import { answerCallback, editHtml, esc, rtl, sendHtml, tg } from './telegram';
 import type { Keyboard } from './telegram';
 import { progressStats } from './tools';
@@ -276,13 +276,20 @@ export async function statusText(env: Env, now: Date): Promise<string> {
   ]);
   const cap = Number(env.MONTHLY_CAP_USD) || 0;
   const tz = env.TIMEZONE;
+  const onClaude = primaryProvider(env) === 'claude';
+  const routineModel = onClaude ? env.ROUTINE_MODEL : env.DEEPSEEK_ROUTINE_MODEL || env.DEEPSEEK_MODEL;
   const at = (iso: string) => `${localParts(new Date(iso), tz).date} ${localParts(new Date(iso), tz).time}`;
   return [
     '<b>🩺 Status</b>',
-    `Chat: <code>${esc(env.CHAT_MODEL)}</code> · routines: <code>${esc(env.ROUTINE_MODEL)}</code>`,
+    `Provider: ${onClaude ? 'Claude' : 'DeepSeek'}`,
+    `Chat: <code>${esc(onClaude ? env.CHAT_MODEL : env.DEEPSEEK_MODEL)}</code> · routines: <code>${esc(routineModel)}</code>`,
     `This month: $${mtd.toFixed(2)}${cap ? ` of $${cap} soft cap ${bar(mtd, cap)}` : ''}`,
-    `Claude: ${breaker.openUntil > now.getTime() ? `paused until ${localParts(new Date(breaker.openUntil), tz).time}` : 'ok'}`,
-    `DeepSeek fallback: ${env.DEEPSEEK_API_KEY ? 'available (asks first)' : 'not configured'}`,
+    ...(onClaude
+      ? [
+          `Claude: ${breaker.openUntil > now.getTime() ? `paused until ${localParts(new Date(breaker.openUntil), tz).time}` : 'ok'}`,
+          `DeepSeek fallback: ${env.DEEPSEEK_API_KEY ? 'available (asks first)' : 'not configured'}`
+        ]
+      : [`DeepSeek key: ${env.DEEPSEEK_API_KEY ? 'set' : 'missing'}`]),
     `Vault: ${env.GITHUB_TOKEN ? esc(env.VAULT_REPO) : 'not connected'}`,
     `Last cron: ${lastCron ? at(lastCron) : 'never'}`,
     `Conversation: ${session ? `#${session.id}, ~${Math.round(session.token_estimate / 1000)}k tokens` : 'none open'}`,

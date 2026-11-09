@@ -1,13 +1,14 @@
 /**
  * Incoming Telegram messages → text blocks for the chat turn. Media becomes text before it enters
- * the conversation: voice through Workers AI Whisper, photos through one Claude vision call. So
- * replayed history never carries images, and the DeepSeek fallback sees the same text.
+ * the conversation: voice through Workers AI Whisper, photos through one vision call on the main
+ * provider (Claude, or DeepSeek Flash). So replayed history never carries images, and either
+ * provider sees the same text.
  */
 
 import { Buffer } from 'node:buffer';
 import type { BetaTextBlockParam } from '@anthropic-ai/sdk/resources/beta/messages/messages';
 import type { Env, TgMessage, TgPhotoSize } from './env';
-import { callClaude, ProviderUnavailable, textOf } from './llm';
+import { call, chatModel, primaryProvider, providerName, ProviderUnavailable, textOf } from './llm';
 import { PHOTO_PROMPT } from './prompts';
 import { downloadFile, esc, MAX_FILE_BYTES, sendHtml } from './telegram';
 
@@ -43,9 +44,9 @@ export function pickPhoto(sizes: TgPhotoSize[]): TgPhotoSize | undefined {
 export async function describeImage(env: Env, fileId: string, mediaType: string): Promise<string> {
   const data = Buffer.from(await downloadFile(env, fileId));
   if (data.byteLength > MAX_IMAGE_BYTES) throw new Error('image is over 5 MB');
-  const res = await callClaude(env, {
+  const res = await call(env, primaryProvider(env), {
     kind: 'vision',
-    model: env.CHAT_MODEL,
+    model: chatModel(env),
     effort: 'low',
     system: PHOTO_PROMPT,
     messages: [{
@@ -119,7 +120,7 @@ export async function messageToBlocks(env: Env, msg: TgMessage): Promise<BetaTex
       const description = await describeImage(env, fileId, imageDoc?.mime_type ?? 'image/jpeg');
       add(`<photo_description>\n${wrapUntrusted('photo', description || '(nothing readable)')}\n</photo_description>`);
     } catch (e) {
-      const why = e instanceof ProviderUnavailable ? `Claude is unavailable: ${e.reason}` : e instanceof Error ? e.message : String(e);
+      const why = e instanceof ProviderUnavailable ? `${providerName(e.provider)} is unavailable: ${e.reason}` : e instanceof Error ? e.message : String(e);
       add(`<photo_description>(the photo could not be read: ${why})</photo_description>`);
     }
     if (caption) add(captionBlock(caption, forwarded));
