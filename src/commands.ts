@@ -28,7 +28,7 @@ export const COMMANDS: [string, string][] = [
   ['areas', 'show or set life areas (/areas phd lab mms)'],
   ['undo', 'revert the last task/reminder/log change (asks first)'],
   ['new', 'start a fresh conversation'],
-  ['model', 'show or switch the AI model (/model opencode kimi-k3)'],
+  ['model', 'pick the AI model (buttons), or /model opencode kimi-k3'],
   ['status', 'models, monthly cost, health']
 ];
 
@@ -234,7 +234,8 @@ export async function handleCommand(env: Env, name: string, args: string, now: D
       await sendHtml(env, await statusText(env, now));
       return true;
     case 'model':
-      await sendHtml(env, await modelCommand(env, args));
+      if (!args || /^(list|ls|menu)$/i.test(args)) await sendHtml(env, modelText(env), modelKeyboard(env));
+      else await sendHtml(env, await modelCommand(env, args));
       return true;
     case 'areas': {
       if (args) {
@@ -310,6 +311,34 @@ function fallbackLine(env: Env): string {
   return 'Fallback: none';
 }
 
+/**
+ * OpenCode Go models the bot can use, with their monthly allowance on the Go plan (opencode.ai/docs/go,
+ * Nov 2026). The free models are left out: OpenCode only serves them to its own app (403 elsewhere).
+ */
+export const OPENCODE_MODELS: [id: string, allowanceUsd: number][] = [
+  ['deepseek-v4.1-flash', 100],
+  ['glm-5.3-flash', 60], ['glm-5.2', 60], ['kimi-k2.7-code', 60], ['minimax-m3', 60], ['qwen3.7-plus', 60],
+  ['mimo-v2.6-flash', 60], ['mimo-v2.5', 60], ['longcat-2.0', 60], ['hy3', 60], ['hy4', 60],
+  ['qwen3.8-flash', 30], ['gemini-4-argon', 30], ['hy4-preview', 30],
+  ['claude-haiku-5-5', 15], ['kimi-k3', 15], ['kimi-k3.1-pro', 15], ['glm-5.3', 15], ['qwen3.8-max', 15],
+  ['deepseek-v4-pro', 15], ['mimo-v2.6-pro', 15], ['step-5-preview', 15], ['grok-4.7', 15], ['gpt-6-luna', 15]
+];
+
+/** Tap-to-switch buttons: every OpenCode Go model (with its allowance), then DeepSeek, Claude and reset. */
+export function modelKeyboard(env: Env): Keyboard {
+  const main = primaryProvider(env);
+  const current = (p: 'claude' | 'deepseek' | 'opencode', model?: string) => main === p && (!model || chatModelFor(env, p) === model);
+  const buttons = OPENCODE_MODELS.map(([id, usd]) => ({ text: `${current('opencode', id) ? '✓ ' : ''}${id} · $${usd}`, callback_data: `m:opencode:${id}` }));
+  const rows: Keyboard = [];
+  for (let i = 0; i < buttons.length; i += 2) rows.push(buttons.slice(i, i + 2));
+  rows.push([
+    { text: `${current('deepseek') ? '✓ ' : ''}DeepSeek`, callback_data: 'm:deepseek' },
+    ...(hasKey(env, 'claude') ? [{ text: `${current('claude') ? '✓ ' : ''}Claude`, callback_data: 'm:claude' }] : []),
+    { text: '↩️ Reset', callback_data: 'm:reset' }
+  ]);
+  return rows;
+}
+
 export function modelText(env: Env): string {
   const main = primaryProvider(env);
   return [
@@ -318,7 +347,7 @@ export function modelText(env: Env): string {
     fallbackLine(env),
     ...[main, ...fallbackProviders(env)].filter(p => !hasKey(env, p)).map(p => `⚠️ ${providerName(p)} API key missing`),
     '',
-    'Switch: <code>/model opencode kimi-k3</code> · <code>/model deepseek</code> · <code>/model claude</code>',
+    'Switch: tap a button under /model, or <code>/model opencode kimi-k3</code> · <code>/model deepseek</code> · <code>/model claude</code>',
     'Back to the deployed config: <code>/model reset</code>'
   ].join('\n');
 }
@@ -434,6 +463,14 @@ export async function handleCallback(env: Env, query: TgCallbackQuery, now: Date
   const data = query.data ?? '';
   if (data === 'noop') {
     await answerCallback(env, query.id);
+    return;
+  }
+  if (data.startsWith('m:')) {
+    // A /model button: "m:opencode:kimi-k3", "m:deepseek", "m:claude", "m:reset".
+    const html = await modelCommand(env, data.slice(2).replace(':', ' '));
+    const next = await withModelChoice(env);
+    await answerCallback(env, query.id, `${providerName(primaryProvider(next))} · ${chatModelFor(next, primaryProvider(next))}`);
+    if (query.message) await editHtml(env, query.message.message_id, html, modelKeyboard(next));
     return;
   }
   const result = await applyButton(env, data, now);

@@ -97,7 +97,7 @@ const MODEL_VAR: Record<Provider, 'CHAT_MODEL' | 'DEEPSEEK_MODEL' | 'OPENCODE_MO
 };
 
 /** Model ids look like "kimi-k3", "claude-haiku-5-5" or "qwen3.8-max". */
-export const isModelId = (s: string) => /^[A-Za-z0-9][\w.:/-]{0,79}$/.test(s);
+export const isModelId = (s: string) => /^[A-Za-z0-9][\w.:/-]{0,59}$/.test(s);
 
 /** The env with the /model choice applied (a copy; the original is untouched). */
 export async function withModelChoice(env: Env): Promise<Env> {
