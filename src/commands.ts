@@ -8,7 +8,8 @@ import { ROUTINE_NAMES } from './env';
 import { activeTasks, applyUndo, first, getAreas, getState, getTask, insertRow, peekUndo, pendingReminders, routines, run, setState, updateRow } from './db';
 import type { Reminder, Routine, Task } from './db';
 import { closeSession } from './agent';
-import { breakerState, monthToDateUsd, primaryProvider } from './llm';
+import { breakerState, chatModelFor, fallbackProviders, hasKey, isModelId, MODEL_CHOICE_KEY, monthToDateUsd, parseProvider, primaryProvider, providerName, routineModelFor, withModelChoice } from './llm';
+import type { ModelChoice } from './llm';
 import { answerCallback, editHtml, esc, rtl, sendHtml, tg } from './telegram';
 import type { Keyboard } from './telegram';
 import { progressStats } from './tools';
@@ -27,6 +28,7 @@ export const COMMANDS: [string, string][] = [
   ['areas', 'show or set life areas (/areas phd lab mms)'],
   ['undo', 'revert the last task/reminder/log change (asks first)'],
   ['new', 'start a fresh conversation'],
+  ['model', 'show or switch the AI model (/model opencode kimi-k3)'],
   ['status', 'models, monthly cost, health']
 ];
 
@@ -231,6 +233,9 @@ export async function handleCommand(env: Env, name: string, args: string, now: D
     case 'status':
       await sendHtml(env, await statusText(env, now));
       return true;
+    case 'model':
+      await sendHtml(env, await modelCommand(env, args));
+      return true;
     case 'areas': {
       if (args) {
         const areas = [...new Set(args.toLowerCase().split(/[\s,]+/).filter(a => /^[\p{L}\p{N}_-]{2,24}$/u.test(a)))];
@@ -276,25 +281,63 @@ export async function statusText(env: Env, now: Date): Promise<string> {
   ]);
   const cap = Number(env.MONTHLY_CAP_USD) || 0;
   const tz = env.TIMEZONE;
-  const onClaude = primaryProvider(env) === 'claude';
-  const routineModel = onClaude ? env.ROUTINE_MODEL : env.DEEPSEEK_ROUTINE_MODEL || env.DEEPSEEK_MODEL;
+  const main = primaryProvider(env);
+  const chain = [main, ...fallbackProviders(env)];
   const at = (iso: string) => `${localParts(new Date(iso), tz).date} ${localParts(new Date(iso), tz).time}`;
   return [
     '<b>🩺 Status</b>',
-    `Provider: ${onClaude ? 'Claude' : 'DeepSeek'}`,
-    `Chat: <code>${esc(onClaude ? env.CHAT_MODEL : env.DEEPSEEK_MODEL)}</code> · routines: <code>${esc(routineModel)}</code>`,
+    `Provider: ${providerName(main)}`,
+    `Chat: <code>${esc(chatModelFor(env, main))}</code> · routines: <code>${esc(routineModelFor(env, main))}</code>`,
+    fallbackLine(env),
     `This month: $${mtd.toFixed(2)}${cap ? ` of $${cap} soft cap ${bar(mtd, cap)}` : ''}`,
-    ...(onClaude
-      ? [
-          `Claude: ${breaker.openUntil > now.getTime() ? `paused until ${localParts(new Date(breaker.openUntil), tz).time}` : 'ok'}`,
-          `DeepSeek fallback: ${env.DEEPSEEK_API_KEY ? 'available (asks first)' : 'not configured'}`
-        ]
-      : [`DeepSeek key: ${env.DEEPSEEK_API_KEY ? 'set' : 'missing'}`]),
+    ...(chain.includes('claude')
+      ? [`Claude: ${breaker.openUntil > now.getTime() ? `paused until ${localParts(new Date(breaker.openUntil), tz).time}` : 'ok'}`]
+      : []),
+    ...chain.filter(p => !hasKey(env, p)).map(p => `⚠️ ${providerName(p)} API key missing`),
     `Vault: ${env.GITHUB_TOKEN ? esc(env.VAULT_REPO) : 'not connected'}`,
     `Last cron: ${lastCron ? at(lastCron) : 'never'}`,
     `Conversation: ${session ? `#${session.id}, ~${Math.round(session.token_estimate / 1000)}k tokens` : 'none open'}`,
     lastError ? `Last error (${at(lastError.ts)}): ${esc(lastError.text.slice(0, 300))}` : 'No errors recorded.'
   ].join('\n');
+}
+
+// ---------------------------------------------------------------- /model
+
+function fallbackLine(env: Env): string {
+  const fallbacks = fallbackProviders(env);
+  if (fallbacks.length) return `Fallback: ${fallbacks.map(p => `${providerName(p)} <code>${esc(chatModelFor(env, p))}</code>`).join(' → ')} (automatic)`;
+  if (primaryProvider(env) === 'claude' && env.DEEPSEEK_API_KEY) return 'Fallback: DeepSeek (asks first)';
+  return 'Fallback: none';
+}
+
+export function modelText(env: Env): string {
+  const main = primaryProvider(env);
+  return [
+    '<b>🤖 Model</b>',
+    `Main: ${providerName(main)} <code>${esc(chatModelFor(env, main))}</code> · routines <code>${esc(routineModelFor(env, main))}</code>`,
+    fallbackLine(env),
+    ...[main, ...fallbackProviders(env)].filter(p => !hasKey(env, p)).map(p => `⚠️ ${providerName(p)} API key missing`),
+    '',
+    'Switch: <code>/model opencode kimi-k3</code> · <code>/model deepseek</code> · <code>/model claude</code>',
+    'Back to the deployed config: <code>/model reset</code>'
+  ].join('\n');
+}
+
+/** /model [provider [model]] | reset. The choice lives in the database, so no deploy is needed. */
+export async function modelCommand(env: Env, args: string): Promise<string> {
+  const [first, model, ...rest] = args.split(/\s+/).filter(Boolean);
+  if (!first) return modelText(env);
+  if (/^(reset|default|config)$/i.test(first)) {
+    await setState(env.DB, MODEL_CHOICE_KEY, null);
+    return `↩️ Back to the deployed config.\n\n${modelText(env.DEPLOYED ?? env)}`;
+  }
+  const provider = parseProvider(first);
+  if (!provider || rest.length) return 'Use <code>/model opencode</code>, <code>/model deepseek deepseek-v4-pro</code>, <code>/model claude</code> or <code>/model reset</code>.';
+  if (model && !isModelId(model)) return `<code>${esc(model)}</code> doesn't look like a model id.`;
+  const choice: ModelChoice = { provider, ...(model ? { model } : {}) };
+  await setState(env.DB, MODEL_CHOICE_KEY, choice);
+  const next = await withModelChoice(env);
+  return `✅ Switched. A fresh conversation starts with your next message.\n\n${modelText(next)}`;
 }
 
 // ---------------------------------------------------------------- buttons

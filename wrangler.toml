@@ -1,7 +1,8 @@
 # Life-OS Telegram assistant (Cloudflare Workers, free plan). Setup: README.md
 # Secrets (npx wrangler secret put <NAME>):
 #   TELEGRAM_BOT_TOKEN, OWNER_ID, WEBHOOK_SECRET, DEEPSEEK_API_KEY, GITHUB_TOKEN
-#   ANTHROPIC_API_KEY (only when PROVIDER = "claude")
+#   ANTHROPIC_API_KEY (only when PROVIDER or FALLBACK_PROVIDERS has "claude")
+#   OPENCODE_API_KEY (only when PROVIDER or FALLBACK_PROVIDERS has "opencode")
 name = "life-os-bot"
 main = "src/index.ts"
 compatibility_date = "2026-10-01"
@@ -51,6 +52,12 @@ ROUTINE_MODEL = "claude-opus-5-5"
 # Used when PROVIDER = "deepseek" (DEEPSEEK_MODEL is also the Claude fallback). Flash reads images; Pro doesn't.
 DEEPSEEK_MODEL = "deepseek-flash"
 DEEPSEEK_ROUTINE_MODEL = "deepseek-v4-pro"
+# Used when PROVIDER = "opencode" or as a fallback: the OpenCode Go subscription (model ids: opencode.ai/docs/go).
+OPENCODE_MODEL = "claude-haiku-5-5"
+OPENCODE_ROUTINE_MODEL = ""
+# Tried automatically, in order, when the main provider fails (outage, limit, no credit), e.g. "opencode, claude".
+# Providers without an API key are skipped. Switch the main one from Telegram with /model.
+FALLBACK_PROVIDERS = "opencode"
 MONTHLY_CAP_USD = "40"
 VAULT_REPO = "MehrshadAlipoor/myBlog1"
 VAULT_BRANCH = "main"

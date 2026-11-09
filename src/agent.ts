@@ -10,7 +10,7 @@ import type { BetaContentBlockParam, BetaMessageParam, BetaTextBlockParam, BetaT
 import type { Env } from './env';
 import { activeTasks, all, first, getAreas, getState, memoryFacts, outboxAfter, pendingReminders, run } from './db';
 import type { OutboxRow } from './db';
-import { call, chatModel, primaryProvider, providerName, textOf } from './llm';
+import { callWithFallback, chatModel, chatModelFor, primaryProvider, providerChain, providerName, textOf } from './llm';
 import type { LlmRequest, Provider } from './llm';
 import { SUMMARY_PROMPT, SYSTEM_PROMPT } from './prompts';
 import { recentLogs, reminderLine, runTool, taskLine, TOOLS } from './tools';
@@ -85,7 +85,7 @@ async function summarize(env: Env, sessionId: number): Promise<string | null> {
     .slice(-60_000);
   if (!transcript) return null;
   try {
-    const res = await call(env, primaryProvider(env), {
+    const res = await callWithFallback(env, {
       kind: 'summary',
       model: chatModel(env),
       effort: 'low',
@@ -169,8 +169,9 @@ export async function buildSnapshot(env: Env, now: Date, carry: string | null, r
 
 /**
  * Run one chat turn: append the user's blocks (plus time, and the snapshot or new bot messages)
- * to the session, then loop model ⇄ tools. ProviderUnavailable propagates; the user turn is
- * already stored, so a later DeepSeek retry (continueTurn) answers it.
+ * to the session, then loop model ⇄ tools. On the main provider the FALLBACK_PROVIDERS chain runs
+ * automatically; ProviderUnavailable propagates when all of it fails. The user turn is already
+ * stored, so a later DeepSeek retry (continueTurn) answers it.
  */
 export async function runChatTurn(env: Env, blocks: BetaContentBlockParam[], updateIds: number[], source: string, provider: Provider = primaryProvider(env)): Promise<TurnResult> {
   const now = new Date();
@@ -193,23 +194,26 @@ export async function runChatTurn(env: Env, blocks: BetaContentBlockParam[], upd
     env.DB.prepare('UPDATE sessions SET last_active_at = ?, last_outbox_id = ? WHERE id = ?').bind(now.toISOString(), maxOutbox, session.id)
   ]);
   // Re-read from storage so this request and every later replay send byte-identical history.
-  return runLoop(env, session.id, await loadMessages(env, session.id), provider, source);
+  const chain = provider === primaryProvider(env) ? providerChain(env) : [provider];
+  return runLoop(env, session.id, await loadMessages(env, session.id), chain, source);
 }
 
 /** Answer whatever the session's last user turn asked, e.g. on DeepSeek after Claude failed. */
 export async function continueTurn(env: Env, sessionId: number, provider: Provider): Promise<TurnResult | null> {
   const messages = await loadMessages(env, sessionId);
   if (!messages.length || messages[messages.length - 1]?.role !== 'user') return null;
-  return runLoop(env, sessionId, messages, provider, 'chat');
+  return runLoop(env, sessionId, messages, [provider], 'chat');
 }
 
-async function runLoop(env: Env, sessionId: number, messages: BetaMessageParam[], provider: Provider, source: string): Promise<TurnResult> {
+/** `chain`: the providers to try, in order. Once one answers, the rest of the turn stays on it. */
+async function runLoop(env: Env, sessionId: number, messages: BetaMessageParam[], chain: Provider[], source: string): Promise<TurnResult> {
+  let provider = chain[0] ?? primaryProvider(env);
   const texts: string[] = [];
   let usedTools = false;
   for (let round = 0; round < MAX_ROUNDS; round++) {
     const req: LlmRequest = {
       kind: 'chat',
-      model: provider === 'claude' ? env.CHAT_MODEL : env.DEEPSEEK_MODEL,
+      model: chatModelFor(env, provider),
       effort: 'low',
       system: SYSTEM_PROMPT,
       tools: TOOLS,
@@ -218,7 +222,8 @@ async function runLoop(env: Env, sessionId: number, messages: BetaMessageParam[]
       timeoutMs: 45_000,
       noTools: round === MAX_ROUNDS - 1
     };
-    const res = await call(env, provider, req);
+    const res = await callWithFallback(env, req, [provider, ...chain.filter(p => p !== provider)]);
+    provider = res.provider;
     const content: BetaContentBlockParam[] = res.content.length ? res.content : [{ type: 'text', text: '…' }];
     const text = textOf(content);
     if (text) texts.push(text);

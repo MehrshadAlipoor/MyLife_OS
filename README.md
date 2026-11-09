@@ -4,7 +4,10 @@ Talk to it by **text, voice note (English or Persian) or photo**. It keeps your 
 
 - **Provider:** set `PROVIDER` in `wrangler.toml`, then `npx wrangler deploy`.
   - `deepseek` (the default): DeepSeek Flash for chat and photos, DeepSeek V4 Pro for the morning brief and weekly review.
-  - `claude`: Claude Haiku 5.5 for chat and Claude Opus 5.5 for routines. If Claude is down or out of credits, the bot *asks you* before sending anything to DeepSeek.
+  - `claude`: Claude Haiku 5.5 for chat and Claude Opus 5.5 for routines.
+  - `opencode`: your OpenCode Go subscription, with `OPENCODE_MODEL` (default `claude-haiku-5-5`; any Go model id works, e.g. `kimi-k3`, `glm-5.3`, `qwen3.8-max`).
+- **Automatic fallback:** `FALLBACK_PROVIDERS` (default `"opencode"`) lists providers tried in order when the main one is down, rate limited, over its usage limit or out of credit. The answer is tagged with the provider that wrote it, and a failing provider is skipped for 10 minutes. Providers without an API key are skipped. With no fallbacks and `PROVIDER = "claude"`, the bot *asks you* before sending a message to DeepSeek.
+- **Switch from Telegram:** `/model opencode kimi-k3`, `/model deepseek`, `/model claude`, `/model reset` (back to `wrangler.toml`). No deploy needed.
 - **Hosting:** everything runs on free tiers: a Cloudflare Worker, D1 (SQLite), Queues, Workers AI (Whisper), and GitHub for vault files and backups.
 
 ```
@@ -41,6 +44,8 @@ Rough estimates for about 30 messages a day:
 
 3. **DeepSeek key** (required for `PROVIDER = "deepseek"`; on Claude it's the optional fallback). Create it at platform.deepseek.com.
 
+   **OpenCode Go key** (for `PROVIDER` or `FALLBACK_PROVIDERS` = `"opencode"`). Subscribe to Go and create an API key at opencode.ai/console. Model ids and their monthly limits are listed at opencode.ai/docs/go. Go is a flat subscription, so its calls count $0 toward the soft cap.
+
 4. **GitHub token for the vault and backups** (optional at first; the vault export and backup are skipped without it).
    - Go to GitHub → Settings → Developer settings → **Fine-grained tokens**.
    - Repositories: `myBlog1` and `MyLife_OS`. Permissions → **Contents: Read and write**.
@@ -58,7 +63,8 @@ Rough estimates for about 30 messages a day:
    npx wrangler secret put TELEGRAM_BOT_TOKEN   # from step 1
    npx wrangler secret put OWNER_ID             # your user id from @userinfobot
    npx wrangler secret put DEEPSEEK_API_KEY     # from step 3
-   npx wrangler secret put ANTHROPIC_API_KEY    # from step 2 (only for PROVIDER = "claude")
+   npx wrangler secret put ANTHROPIC_API_KEY    # from step 2 (only if you use Claude)
+   npx wrangler secret put OPENCODE_API_KEY     # from step 3 (only if you use OpenCode Go)
    npx wrangler secret put GITHUB_TOKEN         # from step 4 (optional)
    [guid]::NewGuid().ToString('N')              # prints a random string; copy it
    npx wrangler secret put WEBHOOK_SECRET       # paste that string
@@ -90,7 +96,8 @@ Rough estimates for about 30 messages a day:
 | `/areas` | Show or set your life areas |
 | `/undo` | Shows the last task, reminder, log or memory change and reverts it after you confirm (routine and setting changes are changed back directly) |
 | `/new` | Start a fresh conversation (your data stays) |
-| `/status` | Provider, models, spend this month, last cron run, last error |
+| `/model` | Show or switch the main provider and model: `/model opencode kimi-k3`, `/model deepseek`, `/model reset` |
+| `/status` | Provider, models, fallbacks, spend this month, last cron run, last error |
 
 ### Routines (Europe/Rome; change them with `/routine` or just ask)
 
@@ -118,7 +125,8 @@ It never overwrites a note without that marker, so your own notes are safe. Obsi
 
 - Your data lives in your Cloudflare D1 database and your private GitHub repos.
 - With `PROVIDER = "deepseek"`, messages, photos and routine data go to DeepSeek's API.
-- With `PROVIDER = "claude"`, they go to Anthropic's API, and to DeepSeek only after you tap **Send via DeepSeek** on a specific message. Routines never use DeepSeek then.
+- With `PROVIDER = "claude"`, they go to Anthropic's API, and to DeepSeek only after you tap **Send via DeepSeek** on a specific message (unless DeepSeek is in `FALLBACK_PROVIDERS`). Routines never use DeepSeek then.
+- With `PROVIDER = "opencode"`, or when a provider in `FALLBACK_PROVIDERS` answers, they go to that provider's API without asking. OpenCode Go forwards them to the model's vendor.
 - Forwarded messages, text read from photos, and vault notes are treated as data, never as instructions.
 - Changes to tasks, reminders, logs and memory are logged, and `/undo` reverts them after you confirm.
 
@@ -157,7 +165,7 @@ npx wrangler dev --test-scheduled  # cron: curl "http://localhost:8787/__schedul
 |---|---|
 | `src/index.ts` | Webhook, queue consumer, cron entrypoints |
 | `src/agent.ts` | Sessions, snapshot, append-only tool loop |
-| `src/llm.ts` | Claude and DeepSeek calls, circuit breaker, cost |
+| `src/llm.ts` | Claude, DeepSeek and OpenCode Go calls, automatic fallback, `/model` choice, circuit breaker, cost |
 | `src/tools.ts` | What the model can do |
 | `src/commands.ts` | Slash commands and buttons |
 | `src/routines.ts` | Reminders, brief, check-in, review, export, backup |

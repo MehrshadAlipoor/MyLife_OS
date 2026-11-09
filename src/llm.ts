@@ -1,10 +1,14 @@
 /**
- * Model calls. PROVIDER in wrangler.toml picks the main provider:
+ * Model calls. PROVIDER in wrangler.toml (or /model in Telegram) picks the main provider:
  * - "deepseek": chat, summaries and routines all go to DEEPSEEK_MODEL through DeepSeek's
- *   Anthropic-compatible endpoint. Photos still need Claude (DeepSeek can't read images).
- * - "claude": Haiku for chat, Opus for routines through the Anthropic SDK; DeepSeek only after
- *   the owner taps "Send via DeepSeek".
- * Also: one retry on overload, a circuit breaker for Claude, the DeepSeek request sanitiser, and usage cost.
+ *   Anthropic-compatible endpoint.
+ * - "claude": Haiku for chat, Opus for routines through the Anthropic SDK.
+ * - "opencode": OPENCODE_MODEL through the OpenCode Go subscription's Anthropic-compatible endpoint.
+ * FALLBACK_PROVIDERS lists providers tried automatically, in order, when the main one is unavailable
+ * (outage, rate or usage limit, no credit, bad key). With none set and PROVIDER = "claude", DeepSeek
+ * is offered per message instead ("Send via DeepSeek").
+ * Also: one retry on overload, a circuit breaker for Claude, a cooldown for failing providers, the
+ * request sanitiser for non-Claude endpoints, and usage cost.
  */
 
 import Anthropic from '@anthropic-ai/sdk';
@@ -20,27 +24,87 @@ import type { Env } from './env';
 import { first, getState, run, setState } from './db';
 import { localParts, localTime, zonedToUtc } from './time';
 
-export type Provider = 'claude' | 'deepseek';
+export type Provider = 'claude' | 'deepseek' | 'opencode';
+export const PROVIDERS: Provider[] = ['claude', 'deepseek', 'opencode'];
 export type CallKind = 'chat' | 'vision' | 'summary' | 'brief' | 'review';
 export type Effort = 'low' | 'medium' | 'high';
 
-/** The provider can't be used right now (outage, credits, key, breaker): the caller may offer DeepSeek. */
+/**
+ * The provider can't be used right now (outage, credits, key, breaker, usage limit). `tried` lists
+ * every provider that failed when a fallback chain ran; the caller may still offer DeepSeek.
+ */
 export class ProviderUnavailable extends Error {
-  constructor(readonly reason: string, readonly provider: Provider = 'claude') {
+  constructor(readonly reason: string, readonly provider: Provider = 'claude', readonly tried: Provider[] = [provider]) {
     super(reason);
   }
 }
 
-/** The provider that answers by default, from PROVIDER (anything but "claude" means DeepSeek). */
-export function primaryProvider(env: Env): Provider {
-  return env.PROVIDER?.trim().toLowerCase() === 'claude' ? 'claude' : 'deepseek';
+/** "opencode", "OpenCode Go", "go" → 'opencode'; null if it names no provider. */
+export function parseProvider(text: string | undefined): Provider | null {
+  const t = (text ?? '').trim().toLowerCase().replace(/[\s_-]+/g, '');
+  if (t === 'claude' || t === 'anthropic') return 'claude';
+  if (t === 'deepseek' || t === 'ds') return 'deepseek';
+  if (t === 'opencode' || t === 'opencodego' || t === 'go') return 'opencode';
+  return null;
 }
 
-export const providerName = (p: Provider) => (p === 'claude' ? 'Claude' : 'DeepSeek');
+/** The provider that answers by default, from PROVIDER (DeepSeek when it names none). */
+export function primaryProvider(env: Env): Provider {
+  return parseProvider(env.PROVIDER) ?? 'deepseek';
+}
+
+export const providerName = (p: Provider) => ({ claude: 'Claude', deepseek: 'DeepSeek', opencode: 'OpenCode Go' })[p];
+
+/** Whether the provider's API key is set. */
+export function hasKey(env: Env, p: Provider): boolean {
+  return Boolean(p === 'claude' ? env.ANTHROPIC_API_KEY : p === 'deepseek' ? env.DEEPSEEK_API_KEY : env.OPENCODE_API_KEY);
+}
+
+/** FALLBACK_PROVIDERS ("opencode, deepseek"), in order, without the main provider, repeats, or providers with no key. */
+export function fallbackProviders(env: Env): Provider[] {
+  const main = primaryProvider(env);
+  const list = (env.FALLBACK_PROVIDERS ?? '').split(/[\s,]+/).map(parseProvider).filter((p): p is Provider => p !== null && p !== main && hasKey(env, p));
+  return [...new Set(list)];
+}
+
+/** Every provider a call may use, main first. */
+export const providerChain = (env: Env): Provider[] => [primaryProvider(env), ...fallbackProviders(env)];
+
+/** The chat model on a provider. */
+export function chatModelFor(env: Env, p: Provider): string {
+  return p === 'claude' ? env.CHAT_MODEL : p === 'deepseek' ? env.DEEPSEEK_MODEL : env.OPENCODE_MODEL;
+}
+
+/** The routine (brief, review) model on a provider; its chat model when none is set. */
+export function routineModelFor(env: Env, p: Provider): string {
+  if (p === 'claude') return env.ROUTINE_MODEL;
+  if (p === 'deepseek') return env.DEEPSEEK_ROUTINE_MODEL || env.DEEPSEEK_MODEL;
+  return env.OPENCODE_ROUTINE_MODEL || env.OPENCODE_MODEL;
+}
 
 /** The model that answers chat on the main provider. */
-export function chatModel(env: Env): string {
-  return primaryProvider(env) === 'claude' ? env.CHAT_MODEL : env.DEEPSEEK_MODEL;
+export const chatModel = (env: Env): string => chatModelFor(env, primaryProvider(env));
+
+// ---------------------------------------------------------------- /model: switching without a deploy
+
+/** What /model picked: a main provider and, optionally, its chat model. Overrides wrangler.toml. */
+export interface ModelChoice { provider: Provider; model?: string }
+export const MODEL_CHOICE_KEY = 'model_choice';
+const MODEL_VAR: Record<Provider, 'CHAT_MODEL' | 'DEEPSEEK_MODEL' | 'OPENCODE_MODEL'> = {
+  claude: 'CHAT_MODEL',
+  deepseek: 'DEEPSEEK_MODEL',
+  opencode: 'OPENCODE_MODEL'
+};
+
+/** Model ids look like "kimi-k3", "claude-haiku-5-5" or "qwen3.8-max". */
+export const isModelId = (s: string) => /^[A-Za-z0-9][\w.:/-]{0,79}$/.test(s);
+
+/** The env with the /model choice applied (a copy; the original is untouched). */
+export async function withModelChoice(env: Env): Promise<Env> {
+  const base = env.DEPLOYED ?? env;
+  const choice = await getState<ModelChoice | null>(env.DB, MODEL_CHOICE_KEY, null).catch(() => null);
+  if (!choice || !PROVIDERS.includes(choice.provider)) return base;
+  return { ...base, DEPLOYED: base, PROVIDER: choice.provider, ...(choice.model ? { [MODEL_VAR[choice.provider]]: choice.model } : {}) };
 }
 
 export interface LlmRequest {
@@ -116,6 +180,8 @@ export function costUsd(model: string, t: Tokens): number {
 }
 
 async function logUsage(env: Env, provider: Provider, model: string, kind: CallKind, usage: Partial<Record<string, unknown>> | undefined): Promise<Tokens> {
+  // OpenCode Go is a flat monthly subscription: its tokens don't add to the spend or the soft cap.
+  const free = provider === 'opencode';
   const n = (v: unknown) => (typeof v === 'number' ? v : 0);
   const t: Tokens = {
     input: n(usage?.input_tokens),
@@ -124,7 +190,7 @@ async function logUsage(env: Env, provider: Provider, model: string, kind: CallK
     cacheRead: n(usage?.cache_read_input_tokens)
   };
   await run(env.DB, 'INSERT INTO usage (ts, provider, model, kind, input, output, cache_write, cache_read, usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-    new Date().toISOString(), provider, model, kind, t.input, t.output, t.cacheWrite, t.cacheRead, costUsd(model, t));
+    new Date().toISOString(), provider, model, kind, t.input, t.output, t.cacheWrite, t.cacheRead, free ? 0 : costUsd(model, t));
   return t;
 }
 
@@ -143,8 +209,7 @@ export async function monthToDateUsd(env: Env, now = new Date()): Promise<number
 export async function routineModel(env: Env, now = new Date()): Promise<{ model: string; capped: boolean }> {
   const cap = Number(env.MONTHLY_CAP_USD) || Infinity;
   const capped = (await monthToDateUsd(env, now)) >= cap;
-  const routine = primaryProvider(env) === 'claude' ? env.ROUTINE_MODEL : env.DEEPSEEK_ROUTINE_MODEL || env.DEEPSEEK_MODEL;
-  return { model: capped ? chatModel(env) : routine, capped };
+  return { model: capped ? chatModel(env) : routineModelFor(env, primaryProvider(env)), capped };
 }
 
 // ---------------------------------------------------------------- circuit breaker
@@ -348,8 +413,102 @@ export async function callDeepSeek(env: Env, req: LlmRequest): Promise<LlmResult
   };
 }
 
+const OPENCODE_BASE_URL = 'https://opencode.ai/inference/go/anthropic';
+
+/**
+ * Why OpenCode Go can't answer now. Its usage-limit errors aren't documented, so besides the usual
+ * reasons any 4xx that talks about a limit, quota or allowance counts as the limit being reached.
+ */
+export function openCodeUnavailableReason(e: unknown): string | null {
+  const reason = unavailableReason(e);
+  if (reason === 'rate limited') return 'usage limit reached or rate limited';
+  if (reason) return reason;
+  const message = e instanceof Error ? e.message : '';
+  if (e instanceof Anthropic.APIError && /limit|quota|allowance|subscription|exceeded/i.test(message)) return 'usage limit reached';
+  return null;
+}
+
+/** OpenCode Go (opencode.ai/docs/go): Bearer key from the OpenCode console, same sanitised request as DeepSeek. */
+export async function callOpenCode(env: Env, req: LlmRequest): Promise<LlmResult> {
+  if (!env.OPENCODE_API_KEY) throw new ProviderUnavailable('no OpenCode API key is set', 'opencode');
+  const client = new Anthropic({
+    authToken: env.OPENCODE_API_KEY,
+    baseURL: OPENCODE_BASE_URL,
+    maxRetries: 1,
+    timeout: req.timeoutMs,
+    // OpenCode asks clients to name themselves and send a stable session id (routing, prompt caching).
+    defaultHeaders: { 'User-Agent': 'life-os-bot/1.0', 'x-opencode-session': `life-os-bot-${req.kind}` }
+  });
+  const model = req.model;
+  let msg: Anthropic.Message;
+  try {
+    msg = await client.messages.create(toDeepSeek(req, model));
+  } catch (e) {
+    const reason = openCodeUnavailableReason(e);
+    if (reason) throw new ProviderUnavailable(reason, 'opencode');
+    throw e;
+  }
+  const t = await logUsage(env, 'opencode', model, req.kind, msg.usage as unknown as Record<string, unknown>);
+  const content = plainBlocks(msg.content as unknown[]);
+  return {
+    provider: 'opencode',
+    model,
+    content: content.length ? content : [{ type: 'text', text: '…' }],
+    stopReason: msg.stop_reason,
+    promptTokens: t.input + t.cacheRead + t.cacheWrite
+  };
+}
+
+/** One call on exactly this provider. */
 export function call(env: Env, provider: Provider, req: LlmRequest): Promise<LlmResult> {
-  return provider === 'claude' ? callClaude(env, req) : callDeepSeek(env, req);
+  if (provider === 'claude') return callClaude(env, req);
+  if (provider === 'opencode') return callOpenCode(env, req);
+  return callDeepSeek(env, req);
+}
+
+// ---------------------------------------------------------------- automatic fallback
+
+const COOLDOWN_KEY = 'provider_cooldown';
+export const COOLDOWN_MS = 10 * 60_000;
+
+/** The request's model, moved to another provider: a routine model maps to that provider's routine model. */
+function modelOn(env: Env, from: Provider, to: Provider, model: string): string {
+  if (from === to) return model;
+  return model === routineModelFor(env, from) && model !== chatModelFor(env, from) ? routineModelFor(env, to) : chatModelFor(env, to);
+}
+
+/**
+ * Call the first provider in `chain` (the main one by default) and, when it is unavailable, the
+ * next ones in order. A provider that failed while a later one answered cools down for 10 minutes:
+ * it moves to the end of the chain, so each message doesn't wait on it first. Bugs (e.g. a 400 on
+ * the first provider) still surface. When every provider fails, the ProviderUnavailable names them all.
+ */
+export async function callWithFallback(env: Env, req: LlmRequest, chain: Provider[] = providerChain(env)): Promise<LlmResult> {
+  const lead = chain[0] ?? primaryProvider(env);
+  if (chain.length <= 1) return call(env, lead, req);
+  const now = Date.now();
+  const cooldown = await getState<Partial<Record<Provider, number>>>(env.DB, COOLDOWN_KEY, {});
+  const cooling = (p: Provider) => (cooldown[p] ?? 0) > now;
+  const order = [...chain.filter(p => !cooling(p)), ...chain.filter(cooling)];
+  const failed: [Provider, string][] = [];
+  for (const p of order) {
+    try {
+      const res = await call(env, p, { ...req, model: modelOn(env, lead, p, req.model) });
+      const next = { ...cooldown };
+      for (const [f] of failed) next[f] = now + COOLDOWN_MS;
+      delete next[p];
+      if (failed.length || cooldown[p]) await setState(env.DB, COOLDOWN_KEY, next);
+      return res;
+    } catch (e) {
+      // After the first provider, any API error just means "try the next one".
+      const reason = e instanceof ProviderUnavailable ? e.reason : p !== order[0] && e instanceof Anthropic.APIError ? `error ${e.status ?? ''}`.trim() : null;
+      if (reason === null) throw e;
+      failed.push([p, reason]);
+      console.warn(`${providerName(p)} unavailable (${reason}), trying the next provider`);
+    }
+  }
+  const last = failed[failed.length - 1]!;
+  throw new ProviderUnavailable(failed.map(([p, r]) => `${providerName(p)}: ${r}`).join('; '), last[0], failed.map(([p]) => p));
 }
 
 /** The text of an assistant turn (text blocks only). */
