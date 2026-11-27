@@ -5,7 +5,7 @@
  */
 
 import type { Env, RoutineName } from './env';
-import { activeTasks, addOutbox, all, doneBetween, getAreas, getState, logsBetween, memoryFacts, pendingReminders, run, setState } from './db';
+import { activeTasks, addOutbox, all, doneBetween, getAreas, getState, logsBetween, memoryFacts, pendingReminders, run, setState, withD1Retry } from './db';
 import type { LogRow, Reminder, Routine, Task } from './db';
 import { commitFiles, GENERATED_MARK, isGenerated, readPath } from './github';
 import { callWithFallback, ProviderUnavailable, routineModel, textOf } from './llm';
@@ -41,34 +41,85 @@ export function dueRoutines(list: Routine[], now: Date, tz: string): RoutineName
     .map(r => r.name as RoutineName);
 }
 
+/**
+ * One cron tick. Every D1 call here is safe to repeat, so each retries transient D1 errors
+ * (withD1Retry), and the steps are independent: a failure in one is reported but does not stop the
+ * others. The worst a lost-but-committed claim can do is leave a reminder in 'sending' (re-sent 15
+ * minutes later) or a routine claimed without being queued; claiming happens last, after reminders.
+ */
 export async function runCron(env: Env, now = new Date()): Promise<void> {
-  await setState(env.DB, 'last_cron', now.toISOString());
+  const db = env.DB;
   const errors: string[] = [];
-
-  // A reminder stuck in 'sending' (worker died mid-send) is retried after 15 minutes.
-  await run(env.DB, "UPDATE reminders SET status = 'pending' WHERE status = 'sending' AND next_due_utc <= ?", new Date(now.getTime() - 15 * 60_000).toISOString());
-  const due = await all<Reminder>(env.DB, "UPDATE reminders SET status = 'sending' WHERE status = 'pending' AND next_due_utc <= ? RETURNING *", now.toISOString());
-  for (const r of due) {
+  const step = async (label: string, fn: () => Promise<void>) => {
     try {
-      await sendReminder(env, r, now);
+      await fn();
     } catch (e) {
-      // Only if it is still mid-send: once sent (or cancelled meanwhile) it must not go out again.
-      await run(env.DB, "UPDATE reminders SET status = 'pending' WHERE id = ? AND status = 'sending'", r.id);
-      errors.push(`reminder R${r.id}: ${e instanceof Error ? e.message : String(e)}`);
+      console.error(`cron ${label}`, e);
+      errors.push(`${label}: ${e instanceof Error ? e.message : String(e)}`);
     }
-  }
+  };
 
-  const today = localParts(now, env.TIMEZONE).date;
-  const list = await all<Routine>(env.DB, 'SELECT * FROM routines');
-  for (const name of dueRoutines(list, now, env.TIMEZONE)) {
-    const claimed = await all<{ name: string }>(env.DB,
-      'UPDATE routines SET last_run_date = ? WHERE name = ? AND (last_run_date IS NULL OR last_run_date < ?) RETURNING name', today, name, today);
-    if (claimed.length) await env.QUEUE.send({ kind: 'routine', name, date: today });
-  }
+  await step('heartbeat', () => withD1Retry(() => setState(db, 'last_cron', now.toISOString())));
 
-  if (errors.length) {
-    await recordError(env, errors.join('; '));
-    await warn(env, `Cron problems: ${errors.join('; ')}`);
+  await step('reminders', async () => {
+    // A reminder stuck in 'sending' (worker died mid-send) is retried after 15 minutes.
+    await withD1Retry(() => run(db, "UPDATE reminders SET status = 'pending' WHERE status = 'sending' AND next_due_utc <= ?", new Date(now.getTime() - 15 * 60_000).toISOString()));
+    const due = await withD1Retry(() => all<Reminder>(db, "UPDATE reminders SET status = 'sending' WHERE status = 'pending' AND next_due_utc <= ? RETURNING *", now.toISOString()));
+    for (const r of due) {
+      try {
+        await sendReminder(env, r, now);
+      } catch (e) {
+        // Only if it is still mid-send: once sent (or cancelled meanwhile) it must not go out again.
+        await withD1Retry(() => run(db, "UPDATE reminders SET status = 'pending' WHERE id = ? AND status = 'sending'", r.id)).catch(() => undefined);
+        errors.push(`reminder R${r.id}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  });
+
+  await step('routines', async () => {
+    const today = localParts(now, env.TIMEZONE).date;
+    const list = await all<Routine>(db, 'SELECT * FROM routines');
+    for (const name of dueRoutines(list, now, env.TIMEZONE)) {
+      const claimed = await withD1Retry(() => all<{ name: string }>(db,
+        'UPDATE routines SET last_run_date = ? WHERE name = ? AND (last_run_date IS NULL OR last_run_date < ?) RETURNING name', today, name, today));
+      if (claimed.length) await env.QUEUE.send({ kind: 'routine', name, date: today });
+    }
+  });
+
+  if (errors.length) throw new CronError(errors);
+}
+
+export class CronError extends Error {
+  constructor(readonly problems: string[]) {
+    super(problems.join('; '));
+    this.name = 'CronError';
+  }
+}
+
+/** Consecutive failed cron ticks; the owner is told on the second, so a one-off D1 blip stays quiet. */
+const CRON_FAILURES_KEY = 'cron_failures';
+export const WARN_AFTER_FAILURES = 2;
+
+/** The scheduled handler: run the tick, and warn only when the scheduler keeps failing. */
+export async function cronTick(env: Env, now = new Date()): Promise<void> {
+  let failure: unknown = null;
+  try {
+    await runCron(env, now);
+  } catch (e) {
+    failure = e;
+  }
+  const before = await withD1Retry(() => getState<number>(env.DB, CRON_FAILURES_KEY, 0)).catch(() => null);
+  if (!failure) {
+    if (before) await withD1Retry(() => setState(env.DB, CRON_FAILURES_KEY, 0)).catch(() => undefined);
+    return;
+  }
+  const text = failure instanceof Error ? failure.message : String(failure);
+  await recordError(env, `cron: ${text}`);
+  // Unknown count (D1 itself is down): warn, since we can't tell whether we already did.
+  const count = before == null ? WARN_AFTER_FAILURES : before + 1;
+  if (before != null) await withD1Retry(() => setState(env.DB, CRON_FAILURES_KEY, count)).catch(() => undefined);
+  if (count === WARN_AFTER_FAILURES) {
+    await warn(env, `The scheduler failed ${WARN_AFTER_FAILURES} runs in a row (it retries every 5 minutes; I'll stay quiet until it recovers): ${text.slice(0, 300)}`);
   }
 }
 
@@ -84,10 +135,12 @@ async function sendReminder(env: Env, r: Reminder, now: Date): Promise<void> {
   const text = `⏰ ${r.text}`;
   await sendHtml(env, rtl(`${esc(text)}${r.task_id ? ` /T${r.task_id}` : ''}`), reminderKeyboard(r));
   const next = nextOccurrence(r.repeat, r.local_date, r.local_time, env.TIMEZONE, now);
+  // Already sent, so these must not fail into the caller's "put it back to pending" (a duplicate):
+  // they retry, and are safe to repeat thanks to the status guard.
   if (next) {
-    await run(env.DB, "UPDATE reminders SET status = 'pending', next_due_utc = ?, local_date = ? WHERE id = ? AND status = 'sending'", next.utc.toISOString(), next.date, r.id);
+    await withD1Retry(() => run(env.DB, "UPDATE reminders SET status = 'pending', next_due_utc = ?, local_date = ? WHERE id = ? AND status = 'sending'", next.utc.toISOString(), next.date, r.id));
   } else {
-    await run(env.DB, "UPDATE reminders SET status = 'sent' WHERE id = ? AND status = 'sending'", r.id);
+    await withD1Retry(() => run(env.DB, "UPDATE reminders SET status = 'sent' WHERE id = ? AND status = 'sending'", r.id));
   }
   await addOutbox(env.DB, 'reminder', `${text} (R${r.id}${r.task_id ? `, task T${r.task_id}` : ''})`).catch(e => console.error('outbox', e));
 }

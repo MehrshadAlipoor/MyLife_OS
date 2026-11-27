@@ -14,7 +14,7 @@ import { all, first, run } from './db';
 import { continueTurn, runChatTurn } from './agent';
 import { primaryProvider, providerName, ProviderUnavailable, withModelChoice } from './llm';
 import { messageToBlocks } from './media';
-import { recordError, routineClock, runCron, runRoutine } from './routines';
+import { cronTick, recordError, routineClock, runRoutine } from './routines';
 import { esc, sendHtml, sendMarkdown, tg, typing, warn } from './telegram';
 import { localParts, localTime } from './time';
 
@@ -213,11 +213,9 @@ export default {
   async scheduled(_controller: ScheduledController, rawEnv: Env): Promise<void> {
     const env = await withModelChoice(rawEnv);
     try {
-      await runCron(env);
+      await cronTick(env);
     } catch (e) {
       console.error('cron failed', e);
-      await recordError(env, `cron: ${message(e)}`);
-      await warn(env, `The scheduler failed: ${message(e).slice(0, 300)}`);
     }
   }
 } satisfies ExportedHandler<Env, Job>;
