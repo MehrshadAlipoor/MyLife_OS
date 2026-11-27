@@ -46,12 +46,49 @@ export interface Routine { name: string; local_time: string; days: string; enabl
 
 export interface OutboxRow { id: number; ts: string; kind: string; text: string }
 
+// ---------------------------------------------------------------- transient D1 errors
+
+/**
+ * D1 errors that mean "the database hiccuped, try again" rather than "this query is wrong":
+ * an internal error, a lost connection, a storage reset or an overloaded database.
+ */
+const TRANSIENT = /internal error|network connection lost|connection (was )?reset|object to be reset|reset because its code was updated|overloaded|timed? ?out|temporarily unavailable/i;
+
+export function isTransientD1Error(e: unknown): boolean {
+  return TRANSIENT.test(e instanceof Error ? e.message : String(e));
+}
+
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+/**
+ * Run a D1 call, retrying transient errors with jittered exponential backoff (about 0.1 s, 0.2 s,
+ * 0.4 s, 0.8 s). Only wrap calls that are safe to repeat: a write that committed before its reply
+ * was lost would otherwise apply twice.
+ */
+export async function withD1Retry<T>(fn: () => Promise<T>, attempts = 5, baseMs = 100): Promise<T> {
+  for (let i = 1; ; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      if (i >= attempts || !isTransientD1Error(e)) throw e;
+      await sleep(baseMs * 2 ** (i - 1) * (0.5 + Math.random()));
+    }
+  }
+}
+
+const READ_ONLY = /^\s*(SELECT|WITH)\b/i;
+
+/** Reads are always safe to repeat, so they retry transient errors on their own. */
+function maybeRetry<T>(sql: string, fn: () => Promise<T>): Promise<T> {
+  return READ_ONLY.test(sql) ? withD1Retry(fn) : fn();
+}
+
 export async function all<T>(db: D1Database, sql: string, ...params: unknown[]): Promise<T[]> {
-  return (await db.prepare(sql).bind(...params).all<T>()).results;
+  return maybeRetry(sql, async () => (await db.prepare(sql).bind(...params).all<T>()).results);
 }
 
 export function first<T>(db: D1Database, sql: string, ...params: unknown[]): Promise<T | null> {
-  return db.prepare(sql).bind(...params).first<T>();
+  return maybeRetry(sql, () => db.prepare(sql).bind(...params).first<T>());
 }
 
 export function run(db: D1Database, sql: string, ...params: unknown[]): Promise<D1Result> {
